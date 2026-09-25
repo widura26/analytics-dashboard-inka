@@ -33,27 +33,37 @@ statusN = sapdataset_ringkas[sapdataset_ringkas['PR Status'] == 'N']
 statusAorK = sapdataset_ringkas[(sapdataset_ringkas['PR Status'] == 'A') | (sapdataset_ringkas['PR Status'] == 'K')]
 statusB = sapdataset_ringkas[sapdataset_ringkas['PR Status'] == 'B']
 
-with st.container():
-    col1, col2 = st.columns(2)
+with st.container(border=True):
+    col1, col2 = st.columns(2, border=True)
+    
     with col1:
         pr = {
             'status PR': ['Belum PR', 'Sudah PR', 'Stock'],
             'Total': [len(x), len(y), len(instockData)],
         }
         df = pd.DataFrame(pr)
-    prchart = px.pie(df, values = 'Total', names = 'status PR', title = 'Purchase Requisition')
-    st.subheader("Purchase Requisition")
-    st.plotly_chart(prchart, width="stretch", height=450)
+        prchart = px.pie(df, values = 'Total', names = 'status PR')
+        st.subheader("Purchase Requisition")
+        st.plotly_chart(prchart)
     with col2:
         po = {
             'Status PO': ['N', 'A/K', 'B'],
             'Total': [len(statusN), len(statusAorK), len(statusB)],
         }
         df = pd.DataFrame(po)
-    pochart = px.pie(df, values = 'Total', names = 'Status PO', title = 'Purchase Order')
-    st.subheader("Purchase Order")
-    st.plotly_chart(pochart, width="stretch", height=450)
+        pochart = px.pie(df, values = 'Total', names = 'Status PO')
+        st.subheader("Purchase Order")
+        st.plotly_chart(pochart, width="stretch", height=450)
 
-    x[x["QTY PR TOTAL"] > x["Qty Requested"]]
-    
+with st.container(border=True):
+    st.subheader("Bill Of Material Dataset")
+    bomdataset
+
+with st.container(border=True):
+    st.subheader("SAP Dataset")
+    sapdataset
+
+with st.container(border=True):
+    st.subheader("Match dataset")
+    df_gabung
 
