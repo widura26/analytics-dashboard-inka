@@ -28,6 +28,7 @@ sapdataset = sapdataset.groupby('Kode Material', as_index=False).agg({
 merge_data = pd.merge(nostockData, sapdataset, on='Kode Material', how='inner')
 x = merge_data[merge_data["QTY PR TOTAL"] != merge_data["Qty Requested"]]
 y = merge_data[merge_data["QTY PR TOTAL"] == merge_data["Qty Requested"]]
+z = merge_data[merge_data["QTY PR TOTAL"] < merge_data["Qty Requested"]]
 
 statusN = sapdataset[sapdataset['PR Status'] == 'N']
 statusAorK = sapdataset[(sapdataset['PR Status'] == 'A') | (sapdataset['PR Status'] == 'K')]
@@ -46,9 +47,9 @@ with st.container(border=True):
         st.subheader("Purchase Requisition")
         st.plotly_chart(prchart)
 
-        st.write("Data Stock diambil dari data-data BOM yang memiliki kode material stock.")
-        st.write("Data Sudah PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset sama dengan 'Qty Requested' di SAP dataset")
-        st.write("Data Belum PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset lebih besar dari 'Qty Requested' di SAP dataset")
+        # st.write("Data Stock diambil dari data-data BOM yang memiliki kode material stock.")
+        # st.write("Data Sudah PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset sama dengan 'Qty Requested' di SAP dataset")
+        # st.write("Data Belum PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset lebih besar dari 'Qty Requested' di SAP dataset")
     with col2:
         po = {
             'Status PO': ['N', 'A/K', 'B'],
@@ -75,7 +76,7 @@ with st.container(border=True):
     st.subheader("Match dataset")
     merge_data
 
-# with st.container(border=True):
-#     st.subheader("Data Belum PR")
-#     x[(x["QTY PR TOTAL"] > x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]
+with st.container(border=True):
+    st.subheader("Sample Dataset QTY PR TOTAL < QTY Requested")
+    x[(x["QTY PR TOTAL"] < x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]
 
