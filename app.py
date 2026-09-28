@@ -27,7 +27,6 @@ sapdataset = sapdataset.groupby('Kode Material', as_index=False).agg({
 
 merge_data = pd.merge(nostockData, sapdataset, on='Kode Material', how='inner')
 x = merge_data[merge_data["QTY PR TOTAL"] != merge_data["Qty Requested"]]
-# x[x["QTY PR TOTAL"] > x["Qty Requested"]]
 y = merge_data[merge_data["QTY PR TOTAL"] == merge_data["Qty Requested"]]
 
 statusN = sapdataset[sapdataset['PR Status'] == 'N']
@@ -40,12 +39,16 @@ with st.container(border=True):
     with col1:
         pr = {
             'status PR': ['Belum PR', 'Sudah PR', 'Stock'],
-            'Total': [len(x), len(y), len(instockData)],
+            'Total': [len(x[(x["QTY PR TOTAL"] > x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]), len(y), len(instockData)],
         }
         df = pd.DataFrame(pr)
         prchart = px.pie(df, values = 'Total', names = 'status PR')
         st.subheader("Purchase Requisition")
         st.plotly_chart(prchart)
+
+        st.write("Data Stock diambil dari data-data BOM yang memiliki kode material stock.")
+        st.write("Data Sudah PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset sama dengan 'Qty Requested' di SAP dataset")
+        st.write("Data Belum PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset lebih besar dari 'Qty Requested' di SAP dataset")
     with col2:
         po = {
             'Status PO': ['N', 'A/K', 'B'],
@@ -55,6 +58,10 @@ with st.container(border=True):
         pochart = px.pie(df, values = 'Total', names = 'Status PO')
         st.subheader("Purchase Order")
         st.plotly_chart(pochart, width="stretch", height=450)
+
+        # st.write("Data Stock diambil dari data-data BOM yang memiliki kode material stock.")
+        # st.write("Data Sudah PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' sama dengan 'Qty Requested'")
+        # st.write("Data Belum PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' lebih besar dari 'Qty Requested'")
 
 with st.container(border=True):
     st.subheader("Bill Of Material Dataset")
@@ -67,4 +74,8 @@ with st.container(border=True):
 with st.container(border=True):
     st.subheader("Match dataset")
     merge_data
+
+# with st.container(border=True):
+#     st.subheader("Data Belum PR")
+#     x[(x["QTY PR TOTAL"] > x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]
 
