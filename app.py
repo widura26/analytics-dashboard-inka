@@ -4,11 +4,10 @@ import plotly.express as px
 
 st.set_page_config(layout="wide")
 
-bomUrl = "https://docs.google.com/spreadsheets/d/1Ibki18gicAFziEx1urTrvDv_KkzrkMMnRrbwqNYpOkw/export?format=csv&gid=1134789511"
+bomUrl = "https://docs.google.com/spreadsheets/d/1Ibki18gicAFziEx1urTrvDv_KkzrkMMnRrbwqNYpOkw/export?format=csv&gid=386174298"
 bomdataset = pd.read_csv(bomUrl, low_memory=False)
 instockData = bomdataset[bomdataset["Kode Material Stock"].notna()]
 nostockData = bomdataset[bomdataset["Kode Material Stock"].isna()]
-
 sapdataseturl = "https://docs.google.com/spreadsheets/d/1jnuEazMkGxbXcvP2mvvGlRZQZR-N0FMPf3aNhw5lH7Q/export?format=csv&gid=826586568"
 sapdataset = pd.read_csv(sapdataseturl, low_memory=False)   
 sapdataset.columns = sapdataset.columns.str.strip()
@@ -29,6 +28,8 @@ merge_data = pd.merge(nostockData, sapdataset, on='Kode Material', how='inner')
 x = merge_data[merge_data["QTY PR TOTAL"] != merge_data["Qty Requested"]]
 y = merge_data[merge_data["QTY PR TOTAL"] == merge_data["Qty Requested"]]
 z = merge_data[merge_data["QTY PR TOTAL"] < merge_data["Qty Requested"]]
+xx = x[(x["QTY PR TOTAL"] > x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]
+stockPR = x[x["QTY PR TOTAL"] < x["Qty Requested"]]
 
 statusN = sapdataset[sapdataset['PR Status'] == 'N']
 statusAorK = sapdataset[(sapdataset['PR Status'] == 'A') | (sapdataset['PR Status'] == 'K')]
@@ -39,8 +40,8 @@ with st.container(border=True):
     
     with col1:
         pr = {
-            'status PR': ['Belum PR', 'Sudah PR', 'Stock'],
-            'Total': [len(x[(x["QTY PR TOTAL"] > x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]), len(y), len(instockData)],
+            'status PR': ['Belum PR', 'Sudah PR', 'Stock', 'Stock dan PR'],
+            'Total': [len(xx), len(y), len(instockData), len(stockPR)],
         }
         df = pd.DataFrame(pr)
         prchart = px.pie(df, values = 'Total', names = 'status PR')
