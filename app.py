@@ -1,22 +1,50 @@
+import io
+import time
+
+import requests
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 
 st.set_page_config(layout="wide")
 
+
+@st.cache_data(ttl=300, show_spinner="Memuat dataset...")
+def load_csv(url: str, max_retries: int = 3) -> pd.DataFrame:
+    for attempt in range(max_retries):
+        try:
+            with requests.get(url, timeout=60, stream=True) as resp:
+                resp.raise_for_status()
+                return pd.read_csv(io.BytesIO(resp.content), low_memory=False)
+        except Exception:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
 bomUrl = "https://docs.google.com/spreadsheets/d/1Ibki18gicAFziEx1urTrvDv_KkzrkMMnRrbwqNYpOkw/export?format=csv&gid=386174298"
-bomdataset = pd.read_csv(bomUrl, low_memory=False)
-instockData = bomdataset[bomdataset["Kode Material Stock"].notna()]
-nostockData = bomdataset[bomdataset["Kode Material Stock"].isna()]
+bomdataset = load_csv(bomUrl)
+deleteKomatBomdataset = bomdataset[bomdataset['Kode Material Delete'].isna()]
+instockData = deleteKomatBomdataset[deleteKomatBomdataset["Kode Material Stock"].notna()]
+nostockData = deleteKomatBomdataset[deleteKomatBomdataset["Kode Material Stock"].isna()]
+
 sapdataseturl = "https://docs.google.com/spreadsheets/d/1jnuEazMkGxbXcvP2mvvGlRZQZR-N0FMPf3aNhw5lH7Q/export?format=csv&gid=826586568"
-sapdataset = pd.read_csv(sapdataseturl, low_memory=False)   
+sapdataset = load_csv(sapdataseturl)
 sapdataset.columns = sapdataset.columns.str.strip()
 sapdataset['Qty Requested'] = pd.to_numeric(sapdataset['Qty Requested'].str.replace(',', '').str.replace('.', ''), errors='coerce')
 sapdataset['Qty Requested'] = sapdataset['Qty Requested'].fillna(0).astype(int)
 sapdataset['Ordered'] = pd.to_numeric(sapdataset['Ordered'].str.replace(',', '').str.replace('.', ''), errors='coerce')
 sapdataset['Ordered'] = sapdataset['Ordered'].fillna(0).astype(int)
 
-sapdataset = sapdataset.groupby('Kode Material', as_index=False).agg({
+project_data = sapdataset.groupby("WBS Description").size()
+project_tuple_data = tuple(project_data.index)
+
+option = st.selectbox(
+    "Pilih Project",
+    project_tuple_data
+)
+
+sapdatasetData = sapdataset.groupby('Kode Material', as_index=False).agg({
     'Mat. Description': 'first',
     'Spesifikasi': 'first',
     'PR Status': 'first',
@@ -24,24 +52,40 @@ sapdataset = sapdataset.groupby('Kode Material', as_index=False).agg({
     'Ordered': 'sum'
 })
 
-merge_data = pd.merge(nostockData, sapdataset, on='Kode Material', how='inner')
-x = merge_data[merge_data["QTY PR TOTAL"] != merge_data["Qty Requested"]]
+merge_data = pd.merge(nostockData, sapdatasetData, on='Kode Material', how='inner')
+x = merge_data[(merge_data["QTY PR TOTAL"] > merge_data["Qty Requested"]) | ((merge_data["QTY PR TOTAL"] == 0.0) & (merge_data["Qty Requested"] == 0))]
 y = merge_data[merge_data["QTY PR TOTAL"] == merge_data["Qty Requested"]]
 z = merge_data[merge_data["QTY PR TOTAL"] < merge_data["Qty Requested"]]
-xx = x[(x["QTY PR TOTAL"] > x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]
-stockPR = x[x["QTY PR TOTAL"] < x["Qty Requested"]]
 
-statusN = sapdataset[sapdataset['PR Status'] == 'N']
-statusAorK = sapdataset[(sapdataset['PR Status'] == 'A') | (sapdataset['PR Status'] == 'K')]
-statusB = sapdataset[sapdataset['PR Status'] == 'B']
+statusN = sapdatasetData[sapdatasetData['PR Status'] == 'N']
+statusAorK = sapdatasetData[(sapdatasetData['PR Status'] == 'A') | (sapdatasetData['PR Status'] == 'K')]
+statusB = sapdatasetData[sapdatasetData['PR Status'] == 'B']
+
+with st.container(border=True):
+    col1, col2, col3 = st.columns(3, border=True)
+    
+    with col1:
+        st.subheader("Total Data BOM")
+        bom_data_total = len(bomdataset)
+        st.markdown(f"# {bom_data_total}")
+    with col2:
+        st.subheader("Total Data SAP")
+        sap_data_total = len(sapdataset)
+        st.markdown(f"# {sap_data_total}")
+    with col3:
+        st.subheader("Total Proyek")
+        project_total = len(project_data)
+        st.markdown(f"# {project_total}")
+
 
 with st.container(border=True):
     col1, col2 = st.columns(2, border=True)
+    col3, col4 = st.columns(2, border=True)
     
     with col1:
         pr = {
-            'status PR': ['Belum PR', 'Sudah PR', 'Stock', 'Stock dan PR'],
-            'Total': [len(xx), len(y), len(instockData), len(stockPR)],
+            'status PR': ['Belum PR', 'Sudah PR', 'Stock', 'PR dan Stock'], 
+            'Total': [len(x), len(y), len(instockData), len(z)],
         }
         df = pd.DataFrame(pr)
         prchart = px.pie(df, values = 'Total', names = 'status PR')
@@ -65,19 +109,59 @@ with st.container(border=True):
         # st.write("Data Sudah PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' sama dengan 'Qty Requested'")
         # st.write("Data Belum PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' lebih besar dari 'Qty Requested'")
 
+    # with col3:
+    #     st.subheader("Purchase Requisition")
+    #     st.echarts_chart(
+    #         {
+    #             "xAxis": {"type": "category", "data": ["A", "B", "C", "D", "E"]},
+    #             "yAxis": {"type": "value"},
+    #             "series": [{"type": "bar", "data": [5, 20, 36, 10, 10]}],
+    #         }
+    #     )
+
 with st.container(border=True):
-    st.subheader("Bill Of Material Dataset")
+    st.subheader(f"Bill Of Material Dataset")
     bomdataset
 
 with st.container(border=True):
-    st.subheader("SAP Dataset")
+    st.subheader(f"SAP Dataset")
     sapdataset
 
 with st.container(border=True):
-    st.subheader("Match dataset")
-    merge_data
+    show_under_requested = st.toggle("PR Total < Requested")
+    show_over_requested = st.toggle("Belum PR")
+    show_same_requested = st.toggle("Sudah PR")
+    df_terfilter = merge_data.copy()
+    conditions = []
+
+    if show_under_requested:
+        conditions.append(
+            df_terfilter['QTY PR TOTAL'] < df_terfilter['Qty Requested']
+        )
+
+    if show_over_requested:
+        conditions.append(
+            df_terfilter['QTY PR TOTAL'] > df_terfilter['Qty Requested']
+        )
+
+    if show_same_requested:
+        conditions.append(
+            df_terfilter['QTY PR TOTAL'] == df_terfilter['Qty Requested']
+        )
+
+    if conditions:
+        mask = conditions[0]
+
+        for condition in conditions[1:]:
+            mask = mask | condition
+
+        df_terfilter = df_terfilter[mask]
+
+    st.subheader(f"Merger of BOM and SAP Data ({len(df_terfilter)})")
+    st.dataframe(df_terfilter)
+    
 
 with st.container(border=True):
-    st.subheader("Sample Dataset QTY PR TOTAL < QTY Requested")
-    x[(x["QTY PR TOTAL"] < x["Qty Requested"]) | ((x["QTY PR TOTAL"] == 0.0) & (x["Qty Requested"] == 0))]
+    st.subheader("QTY PR TOTAL < QTY Requested Data")
+    z
 
