@@ -53,10 +53,20 @@ sapdatasetData = sapdataset.groupby('Kode Material', as_index=False).agg({
 })
 
 merge_data = pd.merge(nostockData, sapdatasetData, on='Kode Material', how='inner')
+merge_data_stock = pd.merge(deleteKomatBomdataset, sapdatasetData, on='Kode Material', how='inner')
 x = merge_data[(merge_data["QTY PR TOTAL"] > merge_data["Qty Requested"]) | ((merge_data["QTY PR TOTAL"] == 0.0) & (merge_data["Qty Requested"] == 0))]
 y = merge_data[merge_data["QTY PR TOTAL"] == merge_data["Qty Requested"]]
 z = merge_data[merge_data["QTY PR TOTAL"] < merge_data["Qty Requested"]]
 zz = z[z["Stock Total"] > 0.0]
+# w = merge_data_stock[
+#     (merge_data_stock["QTY PR TOTAL"] < merge_data_stock["Qty Requested"]) & 
+#     (
+#         (merge_data_stock["Stock Total"] > 0.0) | 
+#         (merge_data_stock["Kode Material Stock"].notna() & (merge_data_stock["Stock Total"] == 0.0))
+#     )
+# ]
+w = merge_data_stock[(merge_data_stock["QTY PR TOTAL"] < merge_data_stock["Qty Requested"]) & (merge_data_stock["Stock Total"] > 0.0)]
+
 
 statusN = sapdatasetData[sapdatasetData['PR Status'] == 'N']
 statusAorK = sapdatasetData[(sapdatasetData['PR Status'] == 'A') | (sapdatasetData['PR Status'] == 'K')]
@@ -86,16 +96,12 @@ with st.container(border=True):
     with col1:
         pr = {
             'Status': ['Belum PR', 'Sudah PR', 'Stock', 'PR dan Stock', 'PR Partial'], 
-            'Total': [len(x), len(y), len(instockData), len(zz), len(z[z['Stock Total'] == 0.0])],
+            'Total': [len(x), len(y), len(instockData), len(w), len(z[z['Stock Total'] == 0.0])],
         }
         df = pd.DataFrame(pr)
         prchart = px.pie(df, values = 'Total', names = 'Status')
         st.subheader("Purchase Requisition")
         st.plotly_chart(prchart)
-
-        # st.write("Data Stock diambil dari data-data BOM yang memiliki kode material stock.")
-        # st.write("Data Sudah PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset sama dengan 'Qty Requested' di SAP dataset")
-        # st.write("Data Belum PR diambil dari data-data BOM yang tidak memiliki kode material stock dan 'QTY PR TOTAL' di BOM dataset lebih besar dari 'Qty Requested' di SAP dataset")
     with col2:
         po = {
             'Status PO': ['N', 'A/K', 'B'],
@@ -164,7 +170,7 @@ with st.container(border=True):
 
 with st.container(border=True):
     st.subheader("Stock and PR Data")
-    zz
+    w
 
 with st.container(border=True):
     st.subheader("PR Partial Data")
