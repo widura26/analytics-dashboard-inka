@@ -56,6 +56,7 @@ merge_data = pd.merge(nostockData, sapdatasetData, on='Kode Material', how='inne
 x = merge_data[(merge_data["QTY PR TOTAL"] > merge_data["Qty Requested"]) | ((merge_data["QTY PR TOTAL"] == 0.0) & (merge_data["Qty Requested"] == 0))]
 y = merge_data[merge_data["QTY PR TOTAL"] == merge_data["Qty Requested"]]
 z = merge_data[merge_data["QTY PR TOTAL"] < merge_data["Qty Requested"]]
+zz = z[z["Stock Total"] > 0.0]
 
 statusN = sapdatasetData[sapdatasetData['PR Status'] == 'N']
 statusAorK = sapdatasetData[(sapdatasetData['PR Status'] == 'A') | (sapdatasetData['PR Status'] == 'K')]
@@ -84,11 +85,11 @@ with st.container(border=True):
     
     with col1:
         pr = {
-            'status PR': ['Belum PR', 'Sudah PR', 'Stock', 'PR dan Stock'], 
-            'Total': [len(x), len(y), len(instockData), len(z)],
+            'Status': ['Belum PR', 'Sudah PR', 'Stock', 'PR dan Stock', 'PR Partial'], 
+            'Total': [len(x), len(y), len(instockData), len(zz), len(z[z['Stock Total'] == 0.0])],
         }
         df = pd.DataFrame(pr)
-        prchart = px.pie(df, values = 'Total', names = 'status PR')
+        prchart = px.pie(df, values = 'Total', names = 'Status')
         st.subheader("Purchase Requisition")
         st.plotly_chart(prchart)
 
@@ -162,6 +163,10 @@ with st.container(border=True):
     
 
 with st.container(border=True):
-    st.subheader("QTY PR TOTAL < QTY Requested Data")
-    z
+    st.subheader("Stock and PR Data")
+    zz
+
+with st.container(border=True):
+    st.subheader("PR Partial Data")
+    z[z['Stock Total'] == 0.0]
 
