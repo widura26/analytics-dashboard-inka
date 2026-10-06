@@ -1,4 +1,7 @@
 import streamlit as st
+import sheet_mapping as sm
+
+st.set_page_config(layout="wide")
 
 def main():
     import io
@@ -8,8 +11,6 @@ def main():
     import streamlit as st
     import pandas as pd
     import plotly.express as px
-
-    st.set_page_config(layout="wide")
 
 
     @st.cache_data(ttl=300, show_spinner="Memuat dataset...")
@@ -203,15 +204,19 @@ def second():
 
     bom_data_url = "https://docs.google.com/spreadsheets/d/1Ibki18gicAFziEx1urTrvDv_KkzrkMMnRrbwqNYpOkw/export?format=csv&gid=386174298"
     bom_data = load_csv(bom_data_url)
+    bom_data.duplicated().sum()
 
     sap_data_url = "https://docs.google.com/spreadsheets/d/1jnuEazMkGxbXcvP2mvvGlRZQZR-N0FMPf3aNhw5lH7Q/export?format=csv&gid=826586568"
     sap_data = load_csv(sap_data_url)
-    sap_dataset = load_csv(sap_data_url)
+    sap_data.duplicated().sum()
+    # sap_dataset = load_csv(sap_data_url)
+
+    bom_data.drop_duplicates(inplace=True)
+    sap_data.drop_duplicates(inplace=True)
 
     bom_data.columns = bom_data.columns.str.strip()
-
     sap_data.columns = sap_data.columns.str.strip()
-    sap_dataset.columns = sap_dataset.columns.str.strip()
+    # sap_dataset.columns = sap_dataset.columns.str.strip()
 
     sap_data['Qty Requested'] = pd.to_numeric(sap_data['Qty Requested'].str.replace(',', '').str.replace('.', ''), errors='coerce')
     sap_data['Qty Requested'] = sap_data['Qty Requested'].fillna(0).astype(int)
@@ -233,9 +238,13 @@ def second():
     sudahPRData = otherData[otherData["QTY PR TOTAL"] == otherData["Qty Requested"]]
     partialPRData = otherData[otherData["QTY PR TOTAL"] < otherData["Qty Requested"]]
 
-    statusN = filtered_sap_data[filtered_sap_data['PR Status'] == 'N']
-    statusAorK = filtered_sap_data[(filtered_sap_data['PR Status'] == 'A') | (filtered_sap_data['PR Status'] == 'K')]
-    statusB = filtered_sap_data[filtered_sap_data['PR Status'] == 'B']
+    # statusN = filtered_sap_data[filtered_sap_data['PR Status'] == 'N']
+    # statusAorK = filtered_sap_data[(filtered_sap_data['PR Status'] == 'A') | (filtered_sap_data['PR Status'] == 'K')]
+    # statusB = filtered_sap_data[filtered_sap_data['PR Status'] == 'B']
+
+    statusB = sudahPRData[sudahPRData["PR Status"] == "B"]
+    statusAorK = sudahPRData[(sudahPRData["PR Status"] == "A") | (sudahPRData["PR Status"] == "K")]
+    statusN = sudahPRData[sudahPRData["PR Status"] == "N"]
 
     with st.container(border=True):
         col1, col2 = st.columns(2, border=True)
@@ -317,11 +326,15 @@ def second():
             st.subheader("PR Partial Data")
             partialPRData
 
+def third():
+    sm.render()
+
 
 
 page_names_to_funcs = {
     "Material Planning": main,
     "Material Planning 2": second,
+    "Sheet Mapping": third
 }
 
 demo_name = st.sidebar.selectbox("Choose a demo", page_names_to_funcs.keys())
