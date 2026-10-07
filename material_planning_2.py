@@ -46,10 +46,18 @@ def render():
     )
 
     project_options = ("Semua",) + tuple(sap_data["WBS_Group"].dropna().unique())
-    selected_project = st.selectbox("Pilih Project", project_options)
+    col_project, col_sheet = st.columns(2)
+    with col_project:
+        selected_project = st.selectbox("Pilih Project", project_options)
     if selected_project != "Semua":
         sap_data = sap_data[sap_data["WBS_Group"] == selected_project]
         bom_data = bom_data[bom_data["WBS Elem"] == selected_project]
+
+    sheet_options = ("Semua",) + tuple(bom_data["Nama Sheet Sumber"].dropna().unique())
+    with col_sheet:
+        selected_sheet = st.selectbox("Nama Sheet Sumber", sheet_options)
+    if selected_sheet != "Semua":
+        bom_data = bom_data[bom_data["Nama Sheet Sumber"] == selected_sheet]
 
     filtered_bom_data = bom_data[bom_data["Kode Material Delete"].isna()]
     filtered_bom_data = filtered_bom_data.groupby(["Kode Material", "Nama Sheet Sumber"], as_index=False).agg({
