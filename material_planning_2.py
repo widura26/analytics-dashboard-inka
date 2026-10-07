@@ -119,11 +119,11 @@ def render():
     
         with col1:
             st.subheader("Total Data BOM")
-            bom_data_total = len(bom_data)
+            bom_data_total = len(filtered_bom_data)
             st.markdown(f"# {bom_data_total}")
         with col2:
             st.subheader("Total Data SAP")
-            sap_data_total = len(sap_data)
+            sap_data_total = len(filtered_sap_data)
             st.markdown(f"# {sap_data_total}")
         with col3:
             st.subheader("Total Proyek")
