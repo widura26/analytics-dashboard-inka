@@ -1,6 +1,7 @@
 import streamlit as st
 import sheet_mapping as sm
 import material_planning as mp
+import material_planning_2 as mp2
 
 st.set_page_config(layout="wide")
 
@@ -187,10 +188,15 @@ def second():
 def third():
     sm.render()
 
+def fourth():
+    mp2.render()
+
+
 page_names_to_funcs = {
     # "Material Planning": main,
-    "Material Planning 2": second,
+    # "Material Planning 2": second,
     # "Sheet Mapping": third
+    "Material Planning 4": fourth
 }
 
 demo_name = st.sidebar.selectbox("Choose a demo", page_names_to_funcs.keys())
