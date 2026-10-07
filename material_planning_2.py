@@ -48,7 +48,7 @@ def render():
     project_options = ("Semua",) + tuple(sap_data["WBS_Group"].dropna().unique())
     col_project, col_sheet = st.columns(2)
     with col_project:
-        selected_project = st.selectbox("Pilih Project", project_options)
+        selected_project = st.selectbox("Pilih Project 2", project_options)
     if selected_project != "Semua":
         sap_data = sap_data[sap_data["WBS_Group"] == selected_project]
         bom_data = bom_data[bom_data["WBS Elem"] == selected_project]
