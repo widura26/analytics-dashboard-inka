@@ -814,7 +814,7 @@ def render():
             mapping_rows.append({
                 "Field": label,
                 "Kolom": column_letter(col_idx) if col_idx is not None else "-",
-                "Nomor Kolom": col_idx + 1 if col_idx is not None else "-",
+                "Nomor Kolom": str(col_idx + 1) if col_idx is not None else "-",
                 "Header": (
                     header_columns[col_idx]
                     if col_idx is not None
