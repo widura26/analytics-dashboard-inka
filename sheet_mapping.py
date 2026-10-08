@@ -804,16 +804,27 @@ def render():
     st.divider()
     st.subheader("4. Generate Rekap")
 
-    jumlah_mapping = len(st.session_state.sheet_mappings)
+    recap_sheets = st.session_state.recap_sheets
+    active = {
+        k: v
+        for k, v in st.session_state.sheet_mappings.items()
+        if k in recap_sheets
+    }
+    belum_dimapping = [
+        s for s in recap_sheets if s not in st.session_state.sheet_mappings
+    ]
 
-    if jumlah_mapping == 0:
+    if not recap_sheets:
+        st.info("Belum ada sheet yang dicentang di sidebar.")
+    elif not active:
         st.info(
-            "Belum ada mapping yang tersimpan. Simpan mapping minimal satu "
-            "sheet di section 3 terlebih dahulu."
+            f"{len(recap_sheets)} sheet dicentang, tetapi belum ada yang "
+            "dimapping. Simpan mapping di section 3 terlebih dahulu."
         )
     else:
         st.caption(
-            f"{jumlah_mapping} sheet dengan mapping tersimpan akan direkap."
+            f"{len(recap_sheets)} sheet dicentang, {len(active)} sudah "
+            f"dimapping, {len(belum_dimapping)} belum."
         )
 
     st.caption(f"Hasil ditulis ke tab: '{REKAP_TAB_NAME}'.")
@@ -821,15 +832,12 @@ def render():
     if st.button(
         "🚀 Generate Rekap",
         type="primary",
-        disabled=jumlah_mapping == 0,
+        disabled=len(active) == 0,
     ):
-        with st.spinner(f"Merekap {jumlah_mapping} sheet..."):
+        with st.spinner(f"Merekap {len(active)} sheet..."):
             try:
                 spreadsheet = open_spreadsheet(spreadsheet_name)
-                df, report = run_recap(
-                    spreadsheet,
-                    st.session_state.sheet_mappings,
-                )
+                df, report = run_recap(spreadsheet, active)
 
                 if df.empty:
                     st.error(
