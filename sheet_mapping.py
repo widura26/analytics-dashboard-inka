@@ -445,7 +445,7 @@ def validate_mapping(mapping, header_columns):
 def render():
     initialize_state()
 
-    st.title("🗂️ BOM Sheet Mapping Tool")
+    st.title("BOM Sheet Mapping")
 
     # ------------------------------------------------------------
     # SIDEBAR
@@ -858,7 +858,7 @@ def render():
             f"dimapping, {len(belum_dimapping)} belum."
         )
 
-    st.caption(f"Hasil ditulis ke tab: '{REKAP_TAB_NAME}'.")
+    st.caption(f"Result : '{REKAP_TAB_NAME}'.")
 
     if st.button(
         "🚀 Generate Rekap",
@@ -888,13 +888,3 @@ def render():
                         st.warning(f"{item['sheet']}: {item['message']}")
             except Exception as exc:
                 st.error(f"Generate rekap gagal: {exc}")
-
-    # ------------------------------------------------------------
-    # SESSION SUMMARY
-    # ------------------------------------------------------------
-
-    st.caption(
-        f"Catatan: mapping disimpan di session dan file {MAPPINGS_FILE}, "
-        "sehingga tetap ada setelah refresh. "
-        "Data sumber tetap berasal langsung dari Google Sheets."
-    )
