@@ -7,6 +7,7 @@ REKAP_TAB_NAME = "REKAP_BOM_TOTAL (Berdasarkan Kode Material) 3"
 
 REKAP_COLUMNS = [
     "Nama Sheet Sumber",
+    "WBS Elem",
     "Kode Material",
     "Kode Material Delete",
     "Stock Total",
@@ -75,9 +76,12 @@ def run_recap(spreadsheet, sheet_mappings):
     """Ekstrak data hanya untuk sheet yang punya mapping tersimpan.
 
     Mengembalikan (DataFrame, report) di mana report berisi status per sheet.
+    Kolom custom (key di luar FIELD_ORDER) di-union lintas sheet, urut kemunculan.
     """
     rows = []
     report = []
+    extra_labels = []
+    extra_numeric = {}
 
     for sheet_name, saved in sheet_mappings.items():
         try:
@@ -108,10 +112,19 @@ def run_recap(spreadsheet, sheet_mappings):
             continue
 
         mapping = saved.get("mapping", {})
+        custom_fields = saved.get("custom_fields", {})
+        wbs_row = saved.get("wbs_row", 2)
+        wbs_col = saved.get("wbs_col", 0)
         data_start = (
             saved.get("header_start_row", 0)
             + saved.get("header_row_count", 1)
         )
+
+        wbs_value = ""
+        if wbs_row and wbs_row > 0 and wbs_row - 1 < len(data):
+            source_row = data[wbs_row - 1]
+            if wbs_col < len(source_row):
+                wbs_value = str(source_row[wbs_col]).strip()
 
         if mapping.get("kode") is None and mapping.get("nama") is None:
             report.append({
@@ -120,6 +133,15 @@ def run_recap(spreadsheet, sheet_mappings):
                 "message": "mapping tidak memiliki Kode Material / Material-Komponen.",
             })
             continue
+
+        extras = [key for key in mapping if key not in FIELD_ORDER]
+
+        for label in extras:
+            if label not in extra_labels:
+                extra_labels.append(label)
+            extra_numeric[label] = bool(
+                custom_fields.get(label, {}).get("numeric", False)
+            )
 
         kode_mapped = mapping.get("kode") is not None
         max_index = max(
@@ -154,7 +176,24 @@ def run_recap(spreadsheet, sheet_mappings):
             if not filter_value or filter_value in KATA_ABAIKAN:
                 continue
 
-            rows.append([sheet_name] + [values[field] for field in FIELD_ORDER])
+            row_data = {"Nama Sheet Sumber": sheet_name, "WBS Elem": wbs_value}
+            row_data.update({
+                col_name: values[field]
+                for field, col_name in zip(FIELD_ORDER, REKAP_COLUMNS[2:])
+            })
+
+            for label in extras:
+                col = mapping.get(label)
+                numeric = extra_numeric.get(label, False)
+
+                if col is None:
+                    row_data[label] = 0.0 if numeric else ""
+                elif numeric:
+                    row_data[label] = parse_number(row[col])
+                else:
+                    row_data[label] = str(row[col]).strip()
+
+            rows.append(row_data)
             extracted += 1
 
         report.append({
@@ -163,7 +202,11 @@ def run_recap(spreadsheet, sheet_mappings):
             "message": f"{extracted} baris terambil.",
         })
 
-    df = pd.DataFrame(rows, columns=REKAP_COLUMNS)
+    columns = REKAP_COLUMNS + extra_labels
+    df = pd.DataFrame(rows, columns=columns)
+
+    for label in extra_labels:
+        df[label] = df[label].fillna(0.0 if extra_numeric.get(label) else "")
 
     return df, report
 
@@ -177,10 +220,17 @@ def write_recap_to_sheets(spreadsheet, df, tab_name=REKAP_TAB_NAME):
         worksheet = spreadsheet.add_worksheet(
             title=tab_name,
             rows="8000",
-            cols=str(len(REKAP_COLUMNS)),
+            cols=str(len(df.columns)),
         )
 
     values = [df.columns.values.tolist()] + df.values.tolist()
+
+    if worksheet.col_count < len(df.columns) or worksheet.row_count < len(values):
+        worksheet.resize(
+            rows=max(worksheet.row_count, len(values)),
+            cols=max(worksheet.col_count, len(df.columns)),
+        )
+
     worksheet.update(values)
 
     return len(df)

@@ -307,17 +307,55 @@ def initialize_state():
     if "selected_sheet" not in st.session_state:
         st.session_state.selected_sheet = None
 
+    if "pending_custom" not in st.session_state:
+        st.session_state.pending_custom = {}
+
+    if "add_col_open" not in st.session_state:
+        st.session_state.add_col_open = False
+
 
 def get_saved_mapping(sheet_name):
     return st.session_state.sheet_mappings.get(sheet_name, {})
 
 
-def save_mapping(sheet_name, mapping, header_start_row, header_row_count):
-    st.session_state.sheet_mappings[sheet_name] = {
+def get_custom_fields(sheet_name):
+    saved = (
+        st.session_state.sheet_mappings
+        .get(sheet_name, {})
+        .get("custom_fields", {})
+    )
+    pending = st.session_state.get("pending_custom", {}).get(sheet_name, {})
+    return {**saved, **pending}
+
+
+def save_mapping(
+    sheet_name,
+    mapping,
+    header_start_row,
+    header_row_count,
+    custom_fields=None,
+    wbs_row=None,
+    wbs_col=None,
+):
+    entry = {
         "header_start_row": header_start_row,
         "header_row_count": header_row_count,
         "mapping": mapping.copy(),
     }
+
+    if custom_fields:
+        entry["custom_fields"] = {
+            label: dict(meta)
+            for label, meta in custom_fields.items()
+        }
+
+    if wbs_row is not None:
+        entry["wbs_row"] = int(wbs_row)
+
+    if wbs_col is not None:
+        entry["wbs_col"] = int(wbs_col)
+
+    st.session_state.sheet_mappings[sheet_name] = entry
     persist_mappings()
 
 
@@ -389,7 +427,13 @@ def preview_mapped_data(data, header_columns, data_start_row, mapping, max_rows=
 
     output = {}
 
-    for field, label in STANDARD_FIELDS.items():
+    preview_fields = list(STANDARD_FIELDS.items()) + [
+        (field, field)
+        for field in mapping
+        if field not in STANDARD_FIELDS
+    ]
+
+    for field, label in preview_fields:
         col_idx = mapping.get(field)
 
         if col_idx is None:
@@ -416,13 +460,14 @@ def validate_mapping(mapping, header_columns):
     errors = []
     selected = {}
 
-    for field, label in STANDARD_FIELDS.items():
+    for field in mapping:
+        label = STANDARD_FIELDS.get(field, field)
         col_idx = mapping.get(field)
 
         if col_idx is None:
             continue
 
-        if col_idx < 0 or col_idx >= len(header_columns):
+        if not isinstance(col_idx, int) or col_idx < 0 or col_idx >= len(header_columns):
             errors.append(f"{label}: kolom tidak valid.")
             continue
 
@@ -436,6 +481,50 @@ def validate_mapping(mapping, header_columns):
             )
 
     return errors
+
+
+@st.dialog("Tambah Kolom")
+def render_add_column_dialog(sheet_name, existing_custom):
+    label_input = st.text_input(
+        "Nama kolom",
+        key="add_col_label",
+        placeholder="mis. Kode Plant",
+    )
+    tipe = st.radio(
+        "Tipe data",
+        ["Teks", "Angka"],
+        horizontal=True,
+        key="add_col_type",
+    )
+
+    col_add, col_cancel = st.columns(2)
+
+    with col_add:
+        if st.button("Tambah", type="primary", width="stretch"):
+            name = (label_input or "").strip()
+            forbidden = (
+                set(STANDARD_FIELDS)
+                | set(STANDARD_FIELDS.values())
+                | set(existing_custom)
+            )
+
+            if not name:
+                st.error("Nama kolom wajib diisi.")
+            elif name in forbidden:
+                st.error(f"Nama '{name}' sudah dipakai.")
+            else:
+                st.session_state.pending_custom.setdefault(sheet_name, {})[name] = {
+                    "numeric": tipe == "Angka",
+                }
+                st.session_state.add_col_open = False
+                st.session_state.pop("add_col_label", None)
+                st.rerun()
+
+    with col_cancel:
+        if st.button("Batal", width="stretch"):
+            st.session_state.add_col_open = False
+            st.session_state.pop("add_col_label", None)
+            st.rerun()
 
 
 # ============================================================
@@ -641,6 +730,48 @@ def render():
     )
 
     # ------------------------------------------------------------
+    # WBS CODE (METADATA SHEET)
+    # ------------------------------------------------------------
+
+    st.markdown("##### Kode WBS (metadata sheet)")
+
+    saved_wbs_row = saved.get("wbs_row", 2)
+    saved_wbs_col = saved.get("wbs_col", 0)
+
+    wbs_col1, wbs_col2, wbs_col3 = st.columns([1, 1, 2])
+
+    with wbs_col1:
+        wbs_row = int(st.number_input(
+            "Baris kode WBS",
+            min_value=0,
+            max_value=len(data),
+            value=min(saved_wbs_row, len(data)),
+            step=1,
+            help="Nomor baris tempat kode WBS berada. Isi 0 jika sheet tanpa kode WBS.",
+        ))
+
+    with wbs_col2:
+        width = get_max_columns(data)
+        wbs_col = st.selectbox(
+            "Kolom kode WBS",
+            options=list(range(width)),
+            index=saved_wbs_col if saved_wbs_col < width else 0,
+            format_func=column_letter,
+        )
+
+    with wbs_col3:
+        if wbs_row == 0:
+            st.info("Sheet ditandai tanpa kode WBS.")
+        elif wbs_row - 1 >= len(data) or wbs_col >= len(data[wbs_row - 1]):
+            st.warning("Posisi di luar data sheet.")
+        else:
+            wbs_value = str(data[wbs_row - 1][wbs_col]).strip()
+            if wbs_value:
+                st.success(f"Terbaca: {wbs_value}")
+            else:
+                st.warning("Cell kosong — periksa posisi baris/kolom.")
+
+    # ------------------------------------------------------------
     # AUTO SUGGESTION
     # ------------------------------------------------------------
 
@@ -670,24 +801,36 @@ def render():
             hide_index=True,
         )
 
+    saved_mapping = saved.get("mapping", {})
+
     if st.button(
         "✨ Isi Mapping dari Saran Exact-Match",
         help="Mengisi pilihan berdasarkan saran. Kamu tetap bisa mengubahnya setelah itu.",
     ):
         mapping = suggestions.copy()
     else:
-        saved_mapping = saved.get("mapping", {})
         mapping = {
             field: saved_mapping.get(field)
             for field in STANDARD_FIELDS
         }
+
+    for label in get_custom_fields(selected_sheet):
+        mapping.setdefault(label, saved_mapping.get(label))
 
     # ------------------------------------------------------------
     # MANUAL MAPPING
     # ------------------------------------------------------------
 
     st.divider()
-    st.subheader("2. Pilih kolom untuk setiap field")
+    hdr_left, hdr_right = st.columns([4, 1])
+
+    with hdr_left:
+        st.subheader("2. Pilih kolom untuk setiap field")
+
+    with hdr_right:
+        if st.button("➕ Tambah Kolom", width="stretch", key="btn_tambah_kolom"):
+            st.session_state.add_col_open = True
+
     st.caption(
         "Pilihan diambil langsung dari kolom sheet. Nama header hanya ditampilkan sebagai "
         "petunjuk; aplikasi menggunakan posisi kolom yang kamu pilih."
@@ -695,9 +838,17 @@ def render():
 
     column_options = build_column_options(header_columns)
 
+    custom_fields_now = get_custom_fields(selected_sheet)
+
+    if st.session_state.add_col_open:
+        render_add_column_dialog(selected_sheet, custom_fields_now)
+
     new_mapping = {}
 
-    fields = list(STANDARD_FIELDS.items())
+    fields = list(STANDARD_FIELDS.items()) + [
+        (label, label)
+        for label in custom_fields_now
+    ]
 
     for start in range(0, len(fields), 2):
         cols = st.columns(2)
@@ -769,6 +920,9 @@ def render():
                 new_mapping,
                 header_start_idx,
                 header_row_count,
+                custom_fields=get_custom_fields(selected_sheet),
+                wbs_row=wbs_row,
+                wbs_col=wbs_col,
             )
             st.success(
                 f"Mapping untuk '{selected_sheet}' berhasil disimpan "
@@ -780,10 +934,12 @@ def render():
             "↩️ Reset Mapping Sheet",
             width='stretch',
         ):
+            custom_labels = get_custom_fields(selected_sheet)
             st.session_state.sheet_mappings.pop(selected_sheet, None)
+            st.session_state.get("pending_custom", {}).pop(selected_sheet, None)
             persist_mappings()
 
-            for field in STANDARD_FIELDS:
+            for field in list(STANDARD_FIELDS) + list(custom_labels):
                 key = f"mapping_{selected_sheet}_{field}"
                 st.session_state.pop(key, None)
 
@@ -808,7 +964,13 @@ def render():
     with st.expander("🔎 Mapping aktif sheet ini"):
         mapping_rows = []
 
-        for field, label in STANDARD_FIELDS.items():
+        active_fields = list(STANDARD_FIELDS.items()) + [
+            (field, field)
+            for field in new_mapping
+            if field not in STANDARD_FIELDS
+        ]
+
+        for field, label in active_fields:
             col_idx = new_mapping.get(field)
 
             mapping_rows.append({
