@@ -28,7 +28,7 @@
 - Consumes: `st.session_state.sheet_mappings` (dict, sudah ada), `st.session_state.selected_sheet` (sudah ada), `sheet_options: list[str]` (dihitung di sidebar, baris 475).
 - Produces: `st.session_state.recap_sheets: list[str]` — daftar sheet tercentang; menjadi satu-satunya input untuk filter Generate (Task 2) dan grup status (Task 3).
 
-- [ ] **Step 1: Ganti `selectbox` sidebar dengan `multiselect`**
+- [x] **Step 1: Ganti `selectbox` sidebar dengan `multiselect`**
 
 Di `render()`, blok sidebar. HAPUS blok lama ini (sheet_mapping.py:481-491):
 
@@ -63,7 +63,7 @@ GANTI dengan inisialisasi state + multiselect (indentasi 8 spasi, di dalam `with
 
 Catatan: tanpa param `default` — state diisi manual di baris sebelum widget dipanggil.
 
-- [ ] **Step 2: Tambah pemilih sheet di area utama sebelum data dimuat**
+- [x] **Step 2: Tambah pemilih sheet di area utama sebelum data dimuat**
 
 Di `render()`, blok `# LOAD SHEET`. SEBELUM baris `try: data = get_sheet_data(...)` (sheet_mapping.py:497) dan setelah blok sidebar berakhir, sisipkan:
 
@@ -95,12 +95,12 @@ Di `render()`, blok `# LOAD SHEET`. SEBELUM baris `try: data = get_sheet_data(..
 
 Indentasi 4 spasi (level fungsi `render()`). Blok `# LOAD SHEET` di bawahnya tidak diubah — `get_sheet_data(spreadsheet_name, selected_sheet)` tetap memakai `selected_sheet` yang baru di-set.
 
-- [ ] **Step 3: Cek kompilasi**
+- [x] **Step 3: Cek kompilasi**
 
 Run: `python -m py_compile sheet_mapping.py`
 Expected: tanpa output, exit code 0.
 
-- [ ] **Step 4: Verifikasi manual di aplikasi**
+- [x] **Step 4: Verifikasi manual di aplikasi**
 
 Run: `.venv/Scripts/streamlit run app.py` lalu buka `http://localhost:8501`.
 
@@ -113,7 +113,7 @@ Checklist:
 6. Uncheck sheet yang sedang terbuka → selectbox pindah ke sheet valid pertama tanpa error.
 7. Simpan mapping di sheet 1, pindah ke sheet 2, kembali ke sheet 1 → pilihan kolom sheet 1 tidak berubah (key per-sheet).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sheet_mapping.py
@@ -131,7 +131,7 @@ git commit -m "feat: multiselect sheet source + main-area mapper selector"
 - Consumes: `st.session_state.recap_sheets: list[str]` (Task 1), `st.session_state.sheet_mappings: dict[str, dict]`.
 - Produces: variabel lokal `active: dict[str, dict]` (mapping tercentang) yang dikirim ke `run_recap(spreadsheet, active)` — `run_recap` sendiri tidak diubah (recap_engine.py:74).
 
-- [ ] **Step 1: Hitung `active` dan ganti caption/infos**
+- [x] **Step 1: Hitung `active` dan ganti caption/infos**
 
 HAPUS blok lama (sheet_mapping.py:784-796):
 
@@ -180,7 +180,7 @@ GANTI dengan:
     st.caption(f"Hasil ditulis ke tab: '{REKAP_TAB_NAME}'.")
 ```
 
-- [ ] **Step 2: Ganti tombol Generate dan pemanggilan `run_recap`**
+- [x] **Step 2: Ganti tombol Generate dan pemanggilan `run_recap`**
 
 HAPUS (sheet_mapping.py:798-809, baris di dalam `if st.button(...)` ikut sampai pemanggilan `run_recap`):
 
@@ -215,7 +215,7 @@ GANTI dengan:
 
 Sisa blok (`if df.empty: ...`, sukses, warning per report, `except`) TIDAK diubah apa pun — struktur bersarangnya identik (`button → spinner → try`), jadi tidak ada perubahan indentasi.
 
-- [ ] **Step 3: Cek kompilasi**
+- [x] **Step 3: Cek kompilasi**
 
 Run: `python -m py_compile sheet_mapping.py`
 Expected: tanpa output, exit code 0. (Kalau gagal dengan `NameError`/`IndentationError` di sekitar `jumlah_mapping`, sisa referensi lama belum terganti — cari dengan `grep -n "jumlah_mapping" sheet_mapping.py`, hasilnya harus nol.)
@@ -223,7 +223,7 @@ Expected: tanpa output, exit code 0. (Kalau gagal dengan `NameError`/`Indentatio
 Run: `grep -c "jumlah_mapping" sheet_mapping.py`
 Expected: `0`
 
-- [ ] **Step 4: Verifikasi manual di aplikasi**
+- [x] **Step 4: Verifikasi manual di aplikasi**
 
 Masih dengan app berjalan:
 
@@ -234,7 +234,7 @@ Masih dengan app berjalan:
 5. Centang sheet yang belum dimapping → caption "…, 1 belum."; Generate tetap jalan untuk yang sudah dimapping.
 6. Uncheck semua → tombol Generate disabled, info "Belum ada sheet yang dicentang di sidebar."
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add sheet_mapping.py
@@ -252,7 +252,7 @@ git commit -m "feat: filter Generate Rekap by checked sheets"
 - Consumes: `st.session_state.recap_sheets` (Task 1), `st.session_state.sheet_mappings`.
 - Produces: tampilan sidebar saja; tidak ada state baru.
 
-- [ ] **Step 1: Ganti isi expander**
+- [x] **Step 1: Ganti isi expander**
 
 HAPUS (sheet_mapping.py:834-843):
 
@@ -304,12 +304,12 @@ GANTI dengan:
                     )
 ```
 
-- [ ] **Step 2: Cek kompilasi**
+- [x] **Step 2: Cek kompilasi**
 
 Run: `python -m py_compile sheet_mapping.py`
 Expected: tanpa output, exit code 0.
 
-- [ ] **Step 3: Verifikasi manual di aplikasi**
+- [x] **Step 3: Verifikasi manual di aplikasi**
 
 1. Expander berjudul "📌 Status mapping".
 2. Sheet tercentang + sudah dimapping → `✓ **nama** — Row N, M header row` di grup "Ikut rekap".
@@ -317,7 +317,7 @@ Expected: tanpa output, exit code 0.
 4. Sheet punya mapping tapi di-uncheck → muncul di grup "Tersimpan, tidak ikut rekap".
 5. Uncheck semua dan hapus semua mapping (tombol Reset per sheet) → caption "Belum ada sheet dicentang maupun mapping tersimpan."
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add sheet_mapping.py

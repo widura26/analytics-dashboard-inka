@@ -111,8 +111,8 @@ Dibagi dua grup:
 | Kasus | Penanganan |
 |---|---|
 | Sheet tercentang sedang dibuka lalu di-uncheck | Fallback ke sheet valid pertama; kalau kosong → `st.info` + stop |
-| Tidak ada sheet dicentang | Area utama `st.info` + stop; Generate disabled |
-| Sheet di-rename/dihapus di Google Sheets | Lolos ke jalur error yang sudah ada; `WorksheetNotFound` di `run_recap` → report "hilang" (recap_engine.py:85) |
+| Tidak ada sheet dicentang | Area utama st.info + stop; section Generate tidak dirender; multiselect + expander "Status mapping" di sidebar tetap tampil |
+| Sheet di-rename/dihapus di Google Sheets | Setelah refresh, nama tersaring dari daftar centang dan muncul di grup "Tersimpan, tidak ikut rekap" (mapping aman); selama cache belum di-refresh, jalur error lama yang menangani (atau report "hilang" di run_recap) tetap berlaku |
 | Tombol "Reset Mapping" | Mapping dihapus, centang tetap → status jadi "belum dimapping" |
 | Tombol "🔄 Refresh Spreadsheet" | `recap_sheets` tetap ada (widget key), tidak hilang |
 | Sheet punya mapping tapi di-uncheck lalu halaman di-refresh | Tercentang kembali — konsekuensi disengaja approach B (state session-only) |
