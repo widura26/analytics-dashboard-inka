@@ -862,16 +862,36 @@ def render():
     # SESSION SUMMARY
     # ------------------------------------------------------------
 
-    with st.sidebar.expander("📌 Mapping yang sudah disimpan"):
-        if not st.session_state.sheet_mappings:
-            st.caption("Belum ada mapping yang disimpan.")
+    with st.sidebar.expander("📌 Status mapping"):
+        mappings = st.session_state.sheet_mappings
+        recap_sheets = st.session_state.recap_sheets
+
+        if not recap_sheets and not mappings:
+            st.caption("Belum ada sheet dicentang maupun mapping tersimpan.")
         else:
-            for name, config in st.session_state.sheet_mappings.items():
-                st.write(
-                    f"**{name}** — "
-                    f"Row {config['header_start_row'] + 1}, "
-                    f"{config['header_row_count']} header row"
-                )
+            if recap_sheets:
+                st.markdown("**Ikut rekap**")
+                for name in recap_sheets:
+                    if name in mappings:
+                        config = mappings[name]
+                        st.write(
+                            f"✓ **{name}** — "
+                            f"Row {config['header_start_row'] + 1}, "
+                            f"{config['header_row_count']} header row"
+                        )
+                    else:
+                        st.write(f"⚠ **{name}** — belum dimapping")
+
+            hidden = [n for n in mappings if n not in recap_sheets]
+            if hidden:
+                st.markdown("**Tersimpan, tidak ikut rekap**")
+                for name in hidden:
+                    config = mappings[name]
+                    st.write(
+                        f"{name} — "
+                        f"Row {config['header_start_row'] + 1}, "
+                        f"{config['header_row_count']} header row"
+                    )
 
     st.caption(
         f"Catatan: mapping disimpan di session dan file {MAPPINGS_FILE}, "
