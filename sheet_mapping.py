@@ -5,6 +5,7 @@ from pathlib import Path
 import gspread
 import pandas as pd
 import streamlit as st
+from google.oauth2.service_account import Credentials
 
 from recap_engine import REKAP_TAB_NAME, run_recap, write_recap_to_sheets
 
@@ -13,8 +14,13 @@ from recap_engine import REKAP_TAB_NAME, run_recap, write_recap_to_sheets
 # ============================================================
 
 SPREADSHEET_DEFAULT = "bom_dataset"
-CREDENTIALS_FILE = "credentials.json"
+CREDENTIALS_FILE = ".streamlit/secrets.toml"
 MAPPINGS_FILE = "sheet_mappings.json"
+
+scopes = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
 STANDARD_FIELDS = {
     "kode": "Kode Material",
@@ -82,8 +88,11 @@ def connect_google_sheets():
             f"File '{CREDENTIALS_FILE}' tidak ditemukan. "
             "Letakkan credentials.json di folder yang sama dengan aplikasi."
         )
+    credentials_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(credentials_dict, scopes=scopes)
+    gc = gspread.authorize(creds)
 
-    return gspread.service_account(filename=str(credentials_path))
+    return gc
 
 
 @st.cache_resource

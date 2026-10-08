@@ -3,3 +3,5 @@ sheet_mappings.json
 .venv/
 __pycache__/
 *.pyc
+.streamlit/
+*.toml
