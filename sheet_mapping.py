@@ -478,17 +478,40 @@ def render():
             st.warning("Tidak ada worksheet yang ditemukan.")
             st.stop()
 
-        current = st.session_state.selected_sheet
-        if current not in sheet_options:
-            current = sheet_options[0]
+        if "recap_sheets" not in st.session_state:
+            st.session_state.recap_sheets = [
+                n for n in sheet_options if n in st.session_state.sheet_mappings
+            ]
 
-        selected_sheet = st.selectbox(
-            "Pilih Sheet",
+        st.multiselect(
+            "Pilih Sheet Sumber Rekap",
             sheet_options,
-            index=sheet_options.index(current),
+            key="recap_sheets",
         )
 
-        st.session_state.selected_sheet = selected_sheet
+    # ------------------------------------------------------------
+    # PICK SHEET TO MAP (dari daftar centang)
+    # ------------------------------------------------------------
+
+    valid_sheets = [
+        s for s in st.session_state.recap_sheets if s in sheet_options
+    ]
+
+    current = st.session_state.selected_sheet
+    if current not in valid_sheets:
+        current = valid_sheets[0] if valid_sheets else None
+
+    if current is None:
+        st.info("Centang sheet di sidebar terlebih dahulu.")
+        st.stop()
+
+    selected_sheet = st.selectbox(
+        "Sheet yang sedang dimapping",
+        valid_sheets,
+        index=valid_sheets.index(current),
+    )
+
+    st.session_state.selected_sheet = selected_sheet
 
     # ------------------------------------------------------------
     # LOAD SHEET
