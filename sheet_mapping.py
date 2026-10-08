@@ -445,7 +445,7 @@ def validate_mapping(mapping, header_columns):
 def render():
     initialize_state()
 
-    st.title("🗂️ BOM Sheet Mapping Tool")
+    st.title("BOM Sheet Mapping")
 
     # ------------------------------------------------------------
     # SIDEBAR
@@ -478,17 +478,71 @@ def render():
             st.warning("Tidak ada worksheet yang ditemukan.")
             st.stop()
 
-        current = st.session_state.selected_sheet
-        if current not in sheet_options:
-            current = sheet_options[0]
+        if "recap_sheets" not in st.session_state:
+            st.session_state.recap_sheets = [
+                n for n in sheet_options if n in st.session_state.sheet_mappings
+            ]
 
-        selected_sheet = st.selectbox(
-            "Pilih Sheet",
+        st.multiselect(
+            "Pilih Sheet Sumber Rekap",
             sheet_options,
-            index=sheet_options.index(current),
+            key="recap_sheets",
         )
 
-        st.session_state.selected_sheet = selected_sheet
+        with st.sidebar.expander("📌 Status mapping"):
+            mappings = st.session_state.sheet_mappings
+            recap_sheets = st.session_state.recap_sheets
+
+            if not recap_sheets and not mappings:
+                st.caption("Belum ada sheet dicentang maupun mapping tersimpan.")
+            else:
+                if recap_sheets:
+                    st.markdown("**Ikut rekap**")
+                    for name in recap_sheets:
+                        if name in mappings:
+                            config = mappings[name]
+                            st.write(
+                                f"✓ **{name}** — "
+                                f"Row {config['header_start_row'] + 1}, "
+                                f"{config['header_row_count']} header row"
+                            )
+                        else:
+                            st.write(f"⚠ **{name}** — belum dimapping")
+
+                hidden = [n for n in mappings if n not in recap_sheets]
+                if hidden:
+                    st.markdown("**Tersimpan, tidak ikut rekap**")
+                    for name in hidden:
+                        config = mappings[name]
+                        st.write(
+                            f"{name} — "
+                            f"Row {config['header_start_row'] + 1}, "
+                            f"{config['header_row_count']} header row"
+                        )
+
+    # ------------------------------------------------------------
+    # PICK SHEET TO MAP (dari daftar centang)
+    # ------------------------------------------------------------
+
+    valid_sheets = [
+        s for s in st.session_state.recap_sheets if s in sheet_options
+    ]
+
+    current = st.session_state.selected_sheet
+    if current not in valid_sheets:
+        current = valid_sheets[0] if valid_sheets else None
+
+    if current is None:
+        st.info("Centang sheet di sidebar terlebih dahulu.")
+        st.stop()
+
+    selected_sheet = st.selectbox(
+        "Sheet yang sedang dimapping",
+        valid_sheets,
+        index=valid_sheets.index(current),
+    )
+
+    st.session_state.selected_sheet = selected_sheet
 
     # ------------------------------------------------------------
     # LOAD SHEET
@@ -760,7 +814,7 @@ def render():
             mapping_rows.append({
                 "Field": label,
                 "Kolom": column_letter(col_idx) if col_idx is not None else "-",
-                "Nomor Kolom": col_idx + 1 if col_idx is not None else "-",
+                "Nomor Kolom": str(col_idx + 1) if col_idx is not None else "-",
                 "Header": (
                     header_columns[col_idx]
                     if col_idx is not None
@@ -781,32 +835,40 @@ def render():
     st.divider()
     st.subheader("4. Generate Rekap")
 
-    jumlah_mapping = len(st.session_state.sheet_mappings)
+    recap_sheets = st.session_state.recap_sheets
+    active = {
+        k: v
+        for k, v in st.session_state.sheet_mappings.items()
+        if k in recap_sheets
+    }
+    belum_dimapping = [
+        s for s in recap_sheets if s not in st.session_state.sheet_mappings
+    ]
 
-    if jumlah_mapping == 0:
+    if not recap_sheets:
+        st.info("Belum ada sheet yang dicentang di sidebar.")
+    elif not active:
         st.info(
-            "Belum ada mapping yang tersimpan. Simpan mapping minimal satu "
-            "sheet di section 3 terlebih dahulu."
+            f"{len(recap_sheets)} sheet dicentang, tetapi belum ada yang "
+            "dimapping. Simpan mapping di section 3 terlebih dahulu."
         )
     else:
         st.caption(
-            f"{jumlah_mapping} sheet dengan mapping tersimpan akan direkap."
+            f"{len(recap_sheets)} sheet dicentang, {len(active)} sudah "
+            f"dimapping, {len(belum_dimapping)} belum."
         )
 
-    st.caption(f"Hasil ditulis ke tab: '{REKAP_TAB_NAME}'.")
+    st.caption(f"Result : '{REKAP_TAB_NAME}'.")
 
     if st.button(
         "🚀 Generate Rekap",
         type="primary",
-        disabled=jumlah_mapping == 0,
+        disabled=len(active) == 0,
     ):
-        with st.spinner(f"Merekap {jumlah_mapping} sheet..."):
+        with st.spinner(f"Merekap {len(active)} sheet..."):
             try:
                 spreadsheet = open_spreadsheet(spreadsheet_name)
-                df, report = run_recap(
-                    spreadsheet,
-                    st.session_state.sheet_mappings,
-                )
+                df, report = run_recap(spreadsheet, active)
 
                 if df.empty:
                     st.error(
@@ -826,24 +888,3 @@ def render():
                         st.warning(f"{item['sheet']}: {item['message']}")
             except Exception as exc:
                 st.error(f"Generate rekap gagal: {exc}")
-
-    # ------------------------------------------------------------
-    # SESSION SUMMARY
-    # ------------------------------------------------------------
-
-    with st.sidebar.expander("📌 Mapping yang sudah disimpan"):
-        if not st.session_state.sheet_mappings:
-            st.caption("Belum ada mapping yang disimpan.")
-        else:
-            for name, config in st.session_state.sheet_mappings.items():
-                st.write(
-                    f"**{name}** — "
-                    f"Row {config['header_start_row'] + 1}, "
-                    f"{config['header_row_count']} header row"
-                )
-
-    st.caption(
-        f"Catatan: mapping disimpan di session dan file {MAPPINGS_FILE}, "
-        "sehingga tetap ada setelah refresh. "
-        "Data sumber tetap berasal langsung dari Google Sheets."
-    )
