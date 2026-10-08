@@ -75,7 +75,6 @@ KATA_KUNCI = {
 
 @st.cache_resource
 def connect_google_sheets():
-    """Connect to Google Sheets using a Service Account JSON file."""
     credentials_path = Path(CREDENTIALS_FILE)
 
     if not credentials_path.exists():
@@ -438,10 +437,6 @@ def render():
     initialize_state()
 
     st.title("🗂️ BOM Sheet Mapping Tool")
-    st.caption(
-        "Ambil struktur sheet langsung dari Google Sheets, pilih multi-row header, "
-        "lalu tentukan kolom yang digunakan untuk setiap field."
-    )
 
     # ------------------------------------------------------------
     # SIDEBAR

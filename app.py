@@ -195,7 +195,7 @@ def fourth():
 page_names_to_funcs = {
     # "Material Planning": main,
     # "Material Planning 2": second,
-    # "Sheet Mapping": third
+    "Sheet Mapping": third,
     "Material Planning 4": fourth
 }
 
