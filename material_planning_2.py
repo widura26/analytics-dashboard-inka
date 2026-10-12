@@ -46,18 +46,21 @@ def render():
     )
 
     project_options = ("Semua",) + tuple(sap_data["WBS_Group"].dropna().unique())
-    col_project, col_sheet = st.columns(2)
+    col_project, col_sheet, col_action = st.columns([1, 1, 0.4], vertical_alignment="bottom")
     with col_project:
-        selected_project = st.selectbox("Pilih Project 2", project_options)
+        selected_project = st.selectbox("Pilih Project", project_options)
     if selected_project != "Semua":
         sap_data = sap_data[sap_data["WBS_Group"] == selected_project]
         bom_data = bom_data[bom_data["WBS Elem"] == selected_project]
 
     sheet_options = ("Semua",) + tuple(bom_data["Nama Sheet Sumber"].dropna().unique())
     with col_sheet:
-        selected_sheet = st.selectbox("Nama Sheet Sumber", sheet_options)
+        selected_sheet = st.selectbox("Daftar Kebutuhan Material", sheet_options)
     if selected_sheet != "Semua":
         bom_data = bom_data[bom_data["Nama Sheet Sumber"] == selected_sheet]
+
+    with col_action:
+        st.button("Generate Data", type="primary", width="stretch")
 
     filtered_bom_data = bom_data[bom_data["Kode Material Delete"].isna()]
     filtered_bom_data = filtered_bom_data.groupby(["Kode Material", "Nama Sheet Sumber"], as_index=False).agg({
@@ -118,19 +121,18 @@ def render():
         col1, col2, col3 = st.columns(3, border=True)
     
         with col1:
-            st.subheader("Total Data BOM")
+            st.subheader("Data BOM")
             bom_data_total = len(filtered_bom_data)
             st.markdown(f"# {bom_data_total}")
         with col2:
-            st.subheader("Total Data SAP")
+            st.subheader("Data SAP")
             sap_data_total = len(filtered_sap_data)
             st.markdown(f"# {sap_data_total}")
         with col3:
-            st.subheader("Total Proyek")
+            st.subheader("Proyek")
             sap_data_total = len(project_data)
             st.markdown(f"# {sap_data_total}")
-
-
+        
         with st.container(border=True):
             col1, col2 = st.columns(2, border=True)
             col3, col4 = st.columns(2, border=True)
@@ -153,6 +155,37 @@ def render():
                 pochart = px.pie(df, values = 'Total', names = 'Status PO', hole=0.3)
                 st.subheader("Purchase Order")
                 st.plotly_chart(pochart, width="stretch", height=450)
+
+        ### diagram batang
+        with st.container(border=True):
+
+            belumPRData = otherData[(otherData["QTY PR TOTAL"] > otherData["Qty Requested"])].copy()
+            belumPRData["Status PR"] = "Belum PR"
+
+            sudahPRData = otherData[otherData["QTY PR TOTAL"] == otherData["Qty Requested"]].copy()
+            sudahPRData["Status PR"] = "Sudah PR"
+
+            partialPRData = otherData[otherData["QTY PR TOTAL"] < otherData["Qty Requested"]].copy()
+            partialPRData["Status PR"] = "Partial PR"
+
+            stockPRData = stockData[(stockData["QTY PR TOTAL"] < stockData["Qty Requested"]) & (stockData["Stock Total"] > 0.0)].copy()
+            stockPRData["Status PR"] = "Stock PR"
+
+            # 2. Gabungkan semua data menjadi satu DataFrame
+            df_all = pd.concat([belumPRData, sudahPRData, partialPRData, stockPRData], ignore_index=True)
+
+            # 3. Hitung jumlah item berdasarkan 'Nama Sheet Sumber' (atau nama kolom sheet Anda) dan 'Status PR'
+            df_grouped = df_all.groupby(["Nama Sheet Sumber", "Status PR"]).size().reset_index(name="Jumlah")
+
+            # 4. Tampilkan grafik dengan st.bar_chart
+            st.bar_chart(
+                df_grouped,
+                x="Nama Sheet Sumber", # Kategori di sumbu Y (karena horizontal=True)
+                y="Jumlah",            # Nilai angka yang ditumpuk
+                color="Status PR",     # Warna berdasarkan kelompok Status
+                horizontal=True
+            )
+        
         with st.container(border=True):
             st.subheader(f"Bill Of Material Dataset")
             st.dataframe(bom_data)
