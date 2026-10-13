@@ -33,10 +33,32 @@ def render():
     bom_data.columns = bom_data.columns.str.strip()
     sap_data.columns = sap_data.columns.str.strip()
 
-    sap_data['Qty Requested'] = pd.to_numeric(sap_data['Qty Requested'].str.replace(',', '').str.replace('.', ''), errors='coerce')
-    sap_data['Qty Requested'] = sap_data['Qty Requested'].fillna(0).astype(int)
-    sap_data['Ordered'] = pd.to_numeric(sap_data['Ordered'].str.replace(',', '').str.replace('.', ''), errors='coerce')
-    sap_data['Ordered'] = sap_data['Ordered'].fillna(0).astype(int)
+    sap_data['Qty Requested'] = (
+        sap_data['Qty Requested']
+        .astype(str)
+        .str.replace('.', '', regex=False)
+        .str.replace(',', '.', regex=False)
+    )
+
+    sap_data['Qty Requested'] = (
+        pd.to_numeric(sap_data['Qty Requested'], errors='coerce')
+        .fillna(0)
+        .astype(int)
+    )
+
+    sap_data['Ordered'] = (
+        sap_data['Ordered']
+        .astype(str)
+        .str.replace('.', '', regex=False)
+        .str.replace(',', '.', regex=False)
+    )
+
+    sap_data['Ordered'] = (
+        pd.to_numeric(sap_data['Ordered'], errors='coerce')
+        .fillna(0)
+        .astype(int)
+    )
+
     sap_data['Req.Date'] = pd.to_datetime(sap_data['Req.Date'], format='%d.%m.%Y')
     sap_data['PR Deliv. Dat'] = pd.to_datetime(sap_data['PR Deliv. Dat'], format='%d.%m.%Y')
     sap_data['Chngd on'] = pd.to_datetime(sap_data['Chngd on'], format='%d.%m.%Y')
