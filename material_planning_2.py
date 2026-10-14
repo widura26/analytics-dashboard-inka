@@ -1,10 +1,166 @@
 import io
+import sys
 import time
 
 import requests
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import tempfile
+import json
+import os
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
+
+SCOPES = ['https://www.googleapis.com/auth/drive']
+
+TOKEN_SECRETS_KEY = "google_oauth_token"
+
+def _refresh_credentials(creds, source):
+    """Refresh access token. Melempar RuntimeError dengan panduan bila gagal."""
+    if creds.valid:
+        return creds
+    if not (creds.expired and creds.refresh_token):
+        raise RuntimeError(
+            f"Token dari {source} tidak valid dan tidak punya refresh_token. "
+            "Hapus token lama lalu login ulang secara lokal."
+        )
+    try:
+        creds.refresh(Request())
+    except Exception as e:
+        raise RuntimeError(
+            f"Refresh token dari {source} ditolak/kedaluwarsa ({e}). "
+            "Login ulang secara lokal (hapus token.json, jalankan aplikasi, "
+            "klik Upload), lalu perbarui token di secrets. "
+            "Catatan: selama consent screen berstatus Testing, refresh token "
+            "Google kedaluwarsa setiap 7 hari."
+        ) from e
+    return creds
+
+def _load_token_from_secrets():
+    """Ambil credential OAuth dari st.secrets — dipakai saat deploy (Streamlit Cloud).
+
+    Isi key di App settings -> Secrets (atau .streamlit/secrets.toml saat lokal):
+        google_oauth_token = '''
+        { ...salin seluruh isi token.json di sini... }
+        '''
+    """
+    try:
+        raw = st.secrets[TOKEN_SECRETS_KEY]
+    except Exception as e:
+        raise RuntimeError(
+            f"st.secrets['{TOKEN_SECRETS_KEY}'] tidak bisa dibaca: {e}"
+        ) from e
+    info = json.loads(raw) if isinstance(raw, str) else dict(raw)
+    return Credentials.from_authorized_user_info(info, SCOPES)
+
+def _has_token_in_secrets():
+    try:
+        return TOKEN_SECRETS_KEY in st.secrets
+    except Exception:
+        return False
+
+def _interactive_login():
+    """Login via browser — hanya untuk mesin lokal yang membuka browser.
+
+    Di Streamlit Cloud alur ini TIDAK akan selesai (redirect localhost mendarat
+    di browser pengunjung, bukan container), jadi deploy wajib punya token di
+    secrets sebelum upload dipanggil.
+    """
+    # Ambil HANYA 3 data utama OAuth yang dibutuhkan oleh library Google
+    oauth_config = {
+        "installed": {
+            "client_id": st.secrets["google_oauth"]["client_id"],
+            "project_id": st.secrets["google_oauth"]["project_id"],
+            "client_secret": st.secrets["google_oauth"]["client_secret"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": ["http://localhost", "http://127.0.0.1"]
+        }
+    }
+
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as temp_json:
+        json.dump(oauth_config, temp_json)
+        temp_json_path = temp_json.name
+
+    try:
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "Login interaktif butuh browser, tapi aplikasi tidak dijalankan "
+                "dari terminal lokal. Untuk deploy, isi st.secrets['"
+                + TOKEN_SECRETS_KEY + "'] dengan isi token.json (dulu di "
+                "mesin lokal: hapus token.json, jalankan aplikasi dari "
+                "terminal, klik Upload untuk login)."
+            )
+        flow = InstalledAppFlow.from_client_secrets_file(temp_json_path, SCOPES)
+        return flow.run_local_server(port=0, prompt='select_account')
+    finally:
+        if os.path.exists(temp_json_path):
+            os.remove(temp_json_path)
+
+def get_drive_service():
+    creds = None
+
+    # 1) Mesin lokal: pakai token.json (hasil login interaktif / refresh sebelumnya)
+    if os.path.exists('token.json'):
+        try:
+            creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+            creds = _refresh_credentials(creds, "token.json")
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+        except Exception:
+            # Token korup atau refresh gagal (mis. expired 7 hari saat status
+            # Testing) -> buang, nanti dibuat ulang lewat login lokal
+            os.remove('token.json')
+            creds = None
+
+    # 2) Deploy (Streamlit Cloud): pakai token dari secrets
+    if creds is None and _has_token_in_secrets():
+        creds = _refresh_credentials(
+            _load_token_from_secrets(),
+            f"st.secrets['{TOKEN_SECRETS_KEY}']",
+        )
+
+    # 3) Belum ada token sama sekali -> login interaktif (mesin lokal)
+    if creds is None:
+        creds = _interactive_login()
+        with open('token.json', 'w') as token:
+            token.write(creds.to_json())
+        st.info(
+            "Login berhasil, token tersimpan di token.json. Untuk deploy ke "
+            "Streamlit Cloud, salin isi file itu ke key `google_oauth_token` "
+            "di App settings -> Secrets."
+        )
+
+    return build('drive', 'v3', credentials=creds)
+
+def upload_to_drive(file_path, original_name, folder_id):
+    try:
+        service = get_drive_service()
+        file_metadata = {
+            'name': original_name,
+            'parents': [folder_id]
+        }
+        media = MediaFileUpload(file_path, resumable=True)
+        
+        uploaded_file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
+        
+        return uploaded_file.get('id')
+    except Exception as e:
+        st.error(f"Upload failed: {e}")
+        return None
+
+
+FOLDER_ID = "10K9oKwxFSvQDRHuTnHI-VYVIHRX8MuKY"
 
 @st.cache_data(ttl=300, show_spinner="Memuat dataset...")
 def load_csv(url: str, max_retries: int = 3) -> pd.DataFrame:
@@ -66,6 +222,21 @@ def render():
     sap_data["WBS_Group"] = sap_data["WBS Elem"].str.extract(
         r"^([A-Z]-\d+\.\d+)"
     )
+
+    uploaded_file = st.file_uploader("Choose a file to upload")
+
+    if uploaded_file is not None:
+        if st.button("Upload to Google Drive"):
+            with st.spinner("Uploading..."):
+                with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+                    temp_file.write(uploaded_file.getvalue())
+                    temp_path = temp_file.name
+
+                file_id = upload_to_drive(temp_path, uploaded_file.name, FOLDER_ID)
+                os.remove(temp_path)
+
+                if file_id:
+                    st.success(f"Success! File uploaded with ID: {file_id}")
 
     project_options = ("Semua",) + tuple(sap_data["WBS_Group"].dropna().unique())
     col_project, col_sheet, col_action = st.columns([1, 1, 0.4], vertical_alignment="bottom")
