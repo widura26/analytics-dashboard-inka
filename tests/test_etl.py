@@ -11,9 +11,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gspread
 import pandas as pd
 
 import bom_rekap
+import material_planning_2 as mp2
 from etl_fixtures import (
     BOM_BYTES, BOM_HEADER, BOM_ROWS, SAP_HEADER, SAP_ROWS, to_csv,
 )
@@ -660,6 +662,192 @@ def test_frame_from_sheet():
     print("[OK] frame_from_sheet: '' -> None, angka & tanggal pulih dari Sheets")
 
 
+# ============================================================
+# PENULISAN BESAR (blok + retry) — regresi kasus 503 SAP_CLEANED
+# ============================================================
+
+def _respon_gagal(status_code):
+    """Response tiruan yang cukup untuk membangun gspread.APIError."""
+
+    class _Respon:
+        def __init__(self):
+            self.status_code = status_code
+
+        def json(self):
+            return {"error": {"code": status_code, "message": "uji gangguan"}}
+
+    return _Respon()
+
+
+class _WorksheetPalsu:
+    """Worksheet tiruan yang mencatat clear/resize/update."""
+
+    def __init__(self, baris=1_000_000, kolom=64):
+        self.row_count = baris
+        self.col_count = kolom
+        self.dikosongkan = False
+        self.resize_panggilan = []
+        self.update_panggilan = []  # [(rentang, values)]
+
+    def clear(self):
+        self.dikosongkan = True
+        return {}
+
+    def resize(self, rows=None, cols=None):
+        self.resize_panggilan.append((rows, cols))
+        self.row_count, self.col_count = rows, cols
+        return {}
+
+    def update(self, values, range_name=None, **kwargs):
+        self.update_panggilan.append((range_name, [list(b) for b in values]))
+        return {}
+
+
+class _SpreadsheetPalsu:
+    def __init__(self, worksheet=None):
+        self._worksheet = worksheet
+
+    def worksheet(self, tab_name):
+        if self._worksheet is None:
+            raise gspread.exceptions.WorksheetNotFound(tab_name)
+        return self._worksheet
+
+    def add_worksheet(self, title, rows, cols):
+        self._worksheet = _WorksheetPalsu(baris=int(rows), kolom=int(cols))
+        return self._worksheet
+
+
+def test_tulis_besar_terpecah_blok():
+    """DataFrame besar dikirim per blok berurutan, bukan satu request raksasa."""
+    n = 4501
+    df = pd.DataFrame({
+        "A": range(n),
+        "B": ["x"] * n,
+        "C": [1.5] * n,
+        "D": ["ket"] * n,
+    })
+    ws = _WorksheetPalsu()
+    jumlah = mp2.write_recap_to_sheets(_SpreadsheetPalsu(ws), df, "SAP_CLEANED")
+
+    assert jumlah == n
+    assert ws.dikosongkan
+    assert [r for r, _ in ws.update_panggilan] == [
+        "A1:D2000", "A2001:D4000", "A4001:D4502",
+    ]
+    gabung = [b for _, blok in ws.update_panggilan for b in blok]
+    assert gabung[0] == list(df.columns)
+    assert len(gabung) == n + 1
+    assert gabung[1][0] == 0 and gabung[-1][0] == n - 1
+    assert not ws.resize_panggilan  # ukuran sheet sudah cukup
+    print("[OK] tulis besar: 4.502 baris -> 3 request berurutan, data utuh")
+
+
+def test_tulis_kecil_satu_request():
+    df = pd.DataFrame({"A": [1, 2], "B": ["a", "b"]})
+    ws = _WorksheetPalsu()
+    jumlah = mp2.write_recap_to_sheets(_SpreadsheetPalsu(ws), df, "TOTAL BOM")
+    assert jumlah == 2
+    assert [r for r, _ in ws.update_panggilan] == ["A1:B3"]
+    print("[OK] tulis kecil: satu request tunggal A1:B3")
+
+
+def test_tulis_resize_bila_kekecilan():
+    df = pd.DataFrame({"A": range(50), "B": ["z"] * 50, "C": range(50)})
+    ws = _WorksheetPalsu(baris=10, kolom=2)
+    mp2.write_recap_to_sheets(_SpreadsheetPalsu(ws), df, "X")
+    assert ws.resize_panggilan == [(51, 3)]
+    assert [r for r, _ in ws.update_panggilan] == ["A1:C51"]
+    print("[OK] tulis besar: resize dulu bila sheet kekecilan")
+
+
+def test_tulis_tab_baru_dibuat():
+    df = pd.DataFrame({"A": [1]})
+    sh = _SpreadsheetPalsu(None)
+    mp2.write_recap_to_sheets(sh, df, "BELUM_ADA")
+    assert sh._worksheet is not None
+    assert not sh._worksheet.dikosongkan
+    assert [r for r, _ in sh._worksheet.update_panggilan] == ["A1:A2"]
+    print("[OK] tulis besar: tab baru dibuat otomatis")
+
+
+def test_retry_transient_gangguan_sementara():
+    """503 diulang dengan backoff 2, 4 dtk, lalu sukses."""
+    import time as time_mod
+
+    asli_sleep = time_mod.sleep
+    jeda = []
+    time_mod.sleep = lambda d: jeda.append(d)
+    try:
+        panggilan = {"n": 0}
+
+        def gagal_dulu():
+            panggilan["n"] += 1
+            if panggilan["n"] <= 2:
+                raise gspread.exceptions.APIError(_respon_gagal(503))
+            return "berhasil"
+
+        assert mp2._retry_transient(gagal_dulu) == "berhasil"
+        assert panggilan["n"] == 3
+        assert jeda == [2, 4]
+    finally:
+        time_mod.sleep = asli_sleep
+    print("[OK] retry: 503 diulang backoff [2, 4] dtk lalu sukses")
+
+
+def test_retry_transient_error_permanen():
+    """403 tidak boleh diulang — langsung dilempar tanpa jeda."""
+    import time as time_mod
+
+    asli_sleep = time_mod.sleep
+    jeda = []
+    time_mod.sleep = lambda d: jeda.append(d)
+    try:
+        panggilan = {"n": 0}
+
+        def selalu_403():
+            panggilan["n"] += 1
+            raise gspread.exceptions.APIError(_respon_gagal(403))
+
+        melempar = False
+        try:
+            mp2._retry_transient(selalu_403)
+        except gspread.exceptions.APIError:
+            melempar = True
+        assert melempar
+        assert panggilan["n"] == 1
+        assert jeda == []
+    finally:
+        time_mod.sleep = asli_sleep
+    print("[OK] retry: 403 permanen langsung melempar (tanpa jeda)")
+
+
+def test_retry_transient_habis_percobaan():
+    """503 terus-menerus: 5 percobaan, backoff [2, 4, 8, 16] dtk, lalu lempar."""
+    import time as time_mod
+
+    asli_sleep = time_mod.sleep
+    jeda = []
+    time_mod.sleep = lambda d: jeda.append(d)
+    try:
+        panggilan = {"n": 0}
+
+        def selalu_503():
+            panggilan["n"] += 1
+            raise gspread.exceptions.APIError(_respon_gagal(503))
+
+        melempar = False
+        try:
+            mp2._retry_transient(selalu_503)
+        except gspread.exceptions.APIError:
+            melempar = True
+        assert melempar
+        assert panggilan["n"] == 5
+        assert jeda == [2, 4, 8, 16]
+    finally:
+        time_mod.sleep = asli_sleep
+    print("[OK] retry: 503 terus-menerus -> 5 percobaan + backoff penuh, lempar")
+
+
 if __name__ == "__main__":
     test_tab_names()
     test_encoding_delimiter()
@@ -685,4 +873,11 @@ if __name__ == "__main__":
     test_rekap_sumber_bom_target_filter()
     test_prepare_upload_state()
     test_frame_from_sheet()
+    test_tulis_besar_terpecah_blok()
+    test_tulis_kecil_satu_request()
+    test_tulis_resize_bila_kekecilan()
+    test_tulis_tab_baru_dibuat()
+    test_retry_transient_gangguan_sementara()
+    test_retry_transient_error_permanen()
+    test_retry_transient_habis_percobaan()
     print("\nSEMUA TEST LULUS")

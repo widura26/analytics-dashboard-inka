@@ -1,11 +1,14 @@
 import io
 import re
+import time
 
 import gspread
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 from google.oauth2.service_account import Credentials
+from gspread.utils import rowcol_to_a1
 
 import bom_rekap
 from csv_utils import grid_to_dataframe, read_csv_text, sniff_delimiter
@@ -195,30 +198,82 @@ def prepare_for_sheets(df: pd.DataFrame) -> pd.DataFrame:
     return out.map(_json_safe)
 
 
+# Penulisan besar: Google menolak payload raksasa dengan 503 (lihat kasus
+# SAP_CLEANED ~102 ribu baris). Kita kirim per blok kecil + ulangi otomatis
+# bila gangguan sementara (429/5xx/timeout).
+CHUNK_ROWS_PER_REQUEST = 2000
+TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504}
+
+
+def _retry_transient(fn, percobaan: int = 5):
+    """Jalankan operasi Sheets API; ulangi bila errornya gangguan sementara.
+
+    429/5xx/timeout diulang dengan backoff 2, 4, 8, 16 detik. Error permanen
+    (mis. 403) langsung dilempar tanpa jeda agar pesannya tetap cepat muncul.
+    """
+    for percobaan_ke in range(1, percobaan + 1):
+        try:
+            return fn()
+        except gspread.exceptions.APIError as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if status not in TRANSIENT_STATUS or percobaan_ke == percobaan:
+                raise
+        except requests.exceptions.RequestException:
+            if percobaan_ke == percobaan:
+                raise
+        time.sleep(2 ** percobaan_ke)
+
+
+def _update_chunked(worksheet, values) -> None:
+    """Kirim `values` ke worksheet per blok baris (lihat CHUNK_ROWS_PER_REQUEST).
+
+    Tiap blok jadi request terpisah dengan range A1 eksplisit, sehingga ukuran
+    request selalu kecil berapa pun ukuran tabelnya.
+    """
+    if not values:
+        return
+
+    nkolom = len(values[0])
+    for awal in range(0, len(values), CHUNK_ROWS_PER_REQUEST):
+        potongan = values[awal:awal + CHUNK_ROWS_PER_REQUEST]
+        rentang = "{}:{}".format(
+            rowcol_to_a1(awal + 1, 1),
+            rowcol_to_a1(awal + len(potongan), nkolom),
+        )
+        _retry_transient(lambda p=potongan, r=rentang: worksheet.update(p, r))
+
+
 def write_recap_to_sheets(spreadsheet, df: pd.DataFrame, tab_name: str) -> int:
     """Tulis DataFrame ke tab Google Sheets (tab dibuat bila belum ada).
 
     Mengembalikan jumlah baris yang ditulis.
     """
-    try:
-        worksheet = spreadsheet.worksheet(tab_name)
+
+    def _siapkan_worksheet():
+        try:
+            worksheet = spreadsheet.worksheet(tab_name)
+        except gspread.exceptions.WorksheetNotFound:
+            return spreadsheet.add_worksheet(
+                title=tab_name,
+                rows="8000",
+                cols=str(len(df.columns)),
+            )
         worksheet.clear()
-    except gspread.exceptions.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(
-            title=tab_name,
-            rows="8000",
-            cols=str(len(df.columns)),
-        )
+        return worksheet
+
+    worksheet = _retry_transient(_siapkan_worksheet)
 
     values = [df.columns.values.tolist()] + df.values.tolist()
 
     if worksheet.col_count < len(df.columns) or worksheet.row_count < len(values):
-        worksheet.resize(
-            rows=max(worksheet.row_count, len(values)),
-            cols=max(worksheet.col_count, len(df.columns)),
+        _retry_transient(
+            lambda: worksheet.resize(
+                rows=max(worksheet.row_count, len(values)),
+                cols=max(worksheet.col_count, len(df.columns)),
+            )
         )
 
-    worksheet.update(values)
+    _update_chunked(worksheet, values)
 
     return len(df)
 
@@ -1218,13 +1273,6 @@ def render_sidebar():
                 )
                 st.code(email, language=None)
 
-        st.divider()
-        st.header("Hasil Tersimpan")
-        st.caption(
-            "Sesi hilang saat refresh browser? Muat ulang hasil rekap, "
-            "cleaning, dan merge dari tab di spreadsheet ini — tanpa "
-            "perlu mengunggah file lagi."
-        )
         if st.button(
             "📥 Muat hasil dari spreadsheet",
             width="stretch",
