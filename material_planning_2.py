@@ -841,9 +841,8 @@ def render_upload_status(prefix: str) -> bool:
         if len(sheets) > 8:
             shown += f", … (+{len(sheets) - 8} lainnya)"
         st.info(
-            f"📄 File Excel dibaca langsung: **{len(sheets)} sheet** "
-            f"({shown}), total {info.get('total_rows', 0):,} baris. "
-            "Semua sheet akan diproses — file asli Anda tidak diubah."
+            f"Detected sheets: **{len(sheets)} sheet** "
+            f"({shown})"
         )
 
     return True
@@ -1203,7 +1202,7 @@ def run_sap_etl(
 
     write_step_result(TAB_SAP_CLEAN, clean, spreadsheet_name, share_email)
 
-    with st.expander("👁️ Preview data SAP bersih"):
+    with st.expander("Preview data SAP bersih"):
         st.dataframe(clean.head(50), width="stretch")
 
 
@@ -1266,15 +1265,11 @@ def render_sidebar():
 
         email = service_account_email()
         if email:
-            with st.expander("🔑 Email service account"):
-                st.caption(
-                    "Bila Anda membuat spreadsheet manual di Drive sendiri, "
-                    "bagikan ke email ini (Editor) lalu isi namanya di atas."
-                )
+            with st.expander("Email service account"):
                 st.code(email, language=None)
 
         if st.button(
-            "📥 Muat hasil dari spreadsheet",
+            "Muat hasil dari spreadsheet",
             width="stretch",
             key="btn_restore",
         ):
@@ -1285,38 +1280,22 @@ def render_sidebar():
 
         st.divider()
 
-        if st.button("🧹 Reset ETL", width="stretch", key="btn_reset_etl"):
+        if st.button("Reset ETL", width="stretch", key="btn_reset_etl"):
             reset_etl()
-
-
-# ============================================================
-# ETL PIPELINE UI
-# ============================================================
 
 def render_pipeline():
     spreadsheet_name = st.session_state.etl_spreadsheet_name.strip()
     share_email = st.session_state.etl_share_email.strip()
 
-    st.subheader("🔄 ETL Pipeline")
-    st.caption(
-        "File hanya dibaca ke memori (tidak disimpan ke disk). File Excel "
-        "dibaca langsung — seluruh sheet ikut diproses. Hasil rekap & cleaning "
-        f"disimpan di Google Spreadsheet '{spreadsheet_name}'."
-    )
-
-    # ------------------------------------------------------------
-    # 1. BOM
-    # ------------------------------------------------------------
-
     with st.container(border=True):
-        st.markdown("### 1️⃣ Upload Bill Of Material")
+        st.markdown("### Upload Bill Of Material")
 
         bom_file = st.file_uploader(
-            "File CSV / Excel Bill Of Material",
+            "File Excel Bill Of Material",
             type=UPLOADER_TYPES,
             key="bom_csv_file",
             help=(
-                "CSV atau Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
+                "Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
                 "ke memori, tidak disimpan ke sistem; file Excel dibaca "
                 "langsung, seluruh sheet diproses."
             ),
@@ -1324,16 +1303,11 @@ def render_pipeline():
         sync_upload("bom", bom_file)
         bom_file_ready = render_upload_status("bom")
 
-        st.caption(
-            "Satu klik menjalankan dua tahap: rekap (deteksi header otomatis, "
-            "multi-row) lalu cleaning."
-        )
-
         col_bom, col_state = st.columns([1, 2])
 
         with col_bom:
             bom_clicked = st.button(
-                "🧹 Rekap & Cleaning BOM",
+                "Rekap & Cleaning",
                 type="primary",
                 key="btn_clean_bom",
                 disabled=not bom_file_ready,
@@ -1371,10 +1345,10 @@ def render_pipeline():
     # ------------------------------------------------------------
 
     with st.container(border=True):
-        st.markdown("### 2️⃣ Upload Data SAP")
+        st.markdown("### Upload SAP")
 
         sap_file = st.file_uploader(
-            "File CSV / Excel SAP",
+            "File Excel SAP",
             type=UPLOADER_TYPES,
             key="sap_csv_file",
             help=(
@@ -1390,7 +1364,7 @@ def render_pipeline():
 
         with col_sap:
             sap_clicked = st.button(
-                "🧹 Rekap & Cleaning SAP",
+                "Rekap & Cleaning",
                 type="primary",
                 key="btn_clean_sap",
                 disabled=not sap_file_ready,
@@ -1422,7 +1396,7 @@ def render_pipeline():
     # ------------------------------------------------------------
 
     with st.container(border=True):
-        st.markdown("### 3️⃣ Generate Data")
+        st.markdown("### Generate Data")
 
         bom_ready = st.session_state.get("etl_bom_clean") is not None
         sap_ready = st.session_state.get("etl_sap_clean") is not None
@@ -1479,12 +1453,12 @@ def render_dashboard():
         st.info(
             "Dashboard tampil setelah langkah **Generate Data** dijalankan. "
             "Bila hasil sudah pernah dibuat lalu browser di-refresh, muat "
-            "kembali lewat tombol **📥 Muat hasil dari spreadsheet** di "
+            "kembali lewat tombol **Muat hasil dari spreadsheet** di "
             "sidebar."
         )
         return
 
-    st.subheader("📊 Dashboard")
+    st.subheader("Dashboard")
     st.caption(
         f"Gabungan BOM × SAP: {len(merge_full):,} baris "
         f"(tab '{TAB_MERGE}', spreadsheet "

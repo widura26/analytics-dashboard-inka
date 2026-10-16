@@ -11,7 +11,7 @@ def fourth():
 
 
 menus = {
-    "📊 Statistic Dashboard": fourth,
+    "Statistic Dashboard": fourth,
 }
 
 
