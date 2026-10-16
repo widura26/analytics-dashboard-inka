@@ -96,6 +96,11 @@ THOUSANDS_ONLY = re.compile(r"^-?\d{1,3}(?:\.\d{3})+$")
 # Key yang tidak ikut dihapus saat tombol Reset ETL ditekan.
 RESET_EXCLUDE_KEYS = {"etl_spreadsheet_name", "etl_share_email"}
 
+# Sesi segar (browser di-refresh): hasil dipulihkan otomatis sekali.
+# Sengaja TIDAK ikut dihapus Reset ETL (prefix "_" di luar pola "etl_"),
+# supaya reset tetap berarti sampai halaman di-refresh ulang.
+AUTO_RESTORE_KEY = "_etl_auto_restore_done"
+
 
 # ============================================================
 # GOOGLE SHEETS
@@ -344,6 +349,42 @@ def _norm_text(value) -> str:
     return str(value).strip()
 
 
+def _unify_mixed_text(df: pd.DataFrame) -> pd.DataFrame:
+    """Samakan kolom object yang tercampur teks+angka menjadi str.
+
+    Sel angka yang terselip di kolom teks (mis. dibaca unformatted dari
+    Sheets, atau sel angka di file sumber) membuat pyArrow gagal
+    serialisasi 'Expected bytes, got int' — Streamlit memang
+    memaksa-casting dan aplikasi tetap jalan, tapi log dipenuhi
+    traceback tiap render. Hanya campuran yang diseragamkan; kolom
+    murni teks maupun numerik dibiarkan apa adanya.
+    """
+    for col in df.columns:
+        series = df[col]
+        if not pd.api.types.is_object_dtype(series):
+            continue
+
+        jenis = set(series.dropna().map(type))
+        if len(jenis) <= 1 or str not in jenis:
+            continue
+
+        def ke_teks(nilai):
+            if isinstance(nilai, str):
+                return nilai
+            try:
+                if pd.isna(nilai):
+                    return None
+            except (TypeError, ValueError):
+                pass
+            if isinstance(nilai, float) and float(nilai).is_integer():
+                return str(int(nilai))
+            return str(nilai)
+
+        df[col] = series.map(ke_teks)
+
+    return df
+
+
 def parse_amount(value) -> float:
     """Angka format Indonesia ('1.234,56') maupun format biasa ('1234.56')."""
     if value is None or _is_missing(value):
@@ -478,6 +519,8 @@ def clean_bom(raw: pd.DataFrame):
     invalid_rows = int((~valid).sum())
     df = df[valid].reset_index(drop=True)
 
+    df = _unify_mixed_text(df)
+
     stats = {
         "rows_in": rows_in,
         "rows_out": len(df),
@@ -533,6 +576,8 @@ def clean_sap(raw: pd.DataFrame):
         "invalid_rows": invalid_rows,
         "wbs_missing": int(df["WBS_Group"].isna().sum()),
     }
+
+    df = _unify_mixed_text(df)
 
     return df, stats
 
@@ -640,12 +685,13 @@ def frame_from_sheet(
         if col in df.columns:
             df[col] = df[col].map(_norm_optional_code)
 
-    return df
+    return _unify_mixed_text(df)
 
 
 def restore_from_spreadsheet(
     spreadsheet_name: str,
     share_email: str = "",
+    silent: bool = False,
 ) -> bool:
     """Pulihkan hasil ETL dari tab di spreadsheet.
 
@@ -654,28 +700,40 @@ def restore_from_spreadsheet(
     pernah ditulis ke spreadsheet. Membaca ke-4 tab lalu mengisi ulang
     state pipeline sehingga dashboard dan tombol Generate tampil lagi
     tanpa mengunggah ulang file. Mengembalikan True bila berhasil.
+
+    silent=True untuk auto-restore sesi baru: bila belum ada hasil /
+    spreadsheet belum bisa dibuka, tidak ada pesan apa pun (pengguna
+    baru tidak dibuat bingung) — hanya sukses yang tampil.
     """
     frames = {}
 
     try:
-        spreadsheet = open_spreadsheet(spreadsheet_name, share_email)
+        spreadsheet = _retry_transient(
+            lambda: open_spreadsheet(spreadsheet_name, share_email)
+        )
     except Exception as exc:
-        st.error(f"Gagal membuka spreadsheet '{spreadsheet_name}': {exc}")
+        if not silent:
+            st.error(f"Gagal membuka spreadsheet '{spreadsheet_name}': {exc}")
         return False
 
     with st.spinner("Membaca hasil dari spreadsheet..."):
         for tab_name, config in RESTORE_CONFIG.items():
             try:
-                worksheet = spreadsheet.worksheet(tab_name)
+                worksheet = _retry_transient(
+                    lambda t=tab_name: spreadsheet.worksheet(t)
+                )
             except gspread.exceptions.WorksheetNotFound:
                 continue  # tab belum pernah ditulis
 
             try:
-                records = worksheet.get_all_records(
-                    value_render_option="UNFORMATTED_VALUE",
+                records = _retry_transient(
+                    lambda w=worksheet: w.get_all_records(
+                        value_render_option="UNFORMATTED_VALUE",
+                    )
                 )
             except Exception as exc:
-                st.error(f"Gagal membaca tab '{tab_name}': {exc}")
+                if not silent:
+                    st.error(f"Gagal membaca tab '{tab_name}': {exc}")
                 return False
 
             if not records:
@@ -684,12 +742,13 @@ def restore_from_spreadsheet(
             frames[tab_name] = frame_from_sheet(records, **config)
 
     if not frames:
-        st.warning(
-            f"Belum ada hasil ETL di spreadsheet '{spreadsheet_name}'. "
-            "Jalankan pipeline dulu — hasilnya tersimpan di tab "
-            f"'{TAB_BOM_REKAP}', '{TAB_BOM_CLEAN}', '{TAB_SAP_CLEAN}', "
-            f"dan '{TAB_MERGE}'."
-        )
+        if not silent:
+            st.warning(
+                f"Belum ada hasil ETL di spreadsheet '{spreadsheet_name}'. "
+                "Jalankan pipeline dulu — hasilnya tersimpan di tab "
+                f"'{TAB_BOM_REKAP}', '{TAB_BOM_CLEAN}', '{TAB_SAP_CLEAN}', "
+                f"dan '{TAB_MERGE}'."
+            )
         return False
 
     # Dashboard membaca kedua frame bersih, jadi merge hanya dipulihkan
@@ -710,7 +769,7 @@ def restore_from_spreadsheet(
     ringkasan = ", ".join(
         f"{tab} {len(df):,} baris" for tab, df in frames.items()
     )
-    st.success(f"Hasil ETL dipulihkan dari spreadsheet: {ringkasan}.")
+    st.success(f"{ringkasan}.")
 
     if merge is None and TAB_MERGE in frames:
         st.caption(
@@ -1120,6 +1179,7 @@ def run_bom_etl(
     df_rekap = (
         pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
     )
+    df_rekap = _unify_mixed_text(df_rekap)
     st.session_state.etl_bom_rekap = df_rekap
     st.session_state.etl_bom_rekap_report = reports
 
@@ -1269,7 +1329,7 @@ def render_sidebar():
                 st.code(email, language=None)
 
         if st.button(
-            "Muat hasil dari spreadsheet",
+            "Load Data",
             width="stretch",
             key="btn_restore",
         ):
@@ -1280,167 +1340,171 @@ def render_sidebar():
 
         st.divider()
 
-        if st.button("Reset ETL", width="stretch", key="btn_reset_etl"):
+        if st.button("Reset", width="stretch", key="btn_reset_etl"):
             reset_etl()
 
 def render_pipeline():
-    spreadsheet_name = st.session_state.etl_spreadsheet_name.strip()
-    share_email = st.session_state.etl_share_email.strip()
 
-    with st.container(border=True):
-        st.markdown("### Upload Bill Of Material")
+    with st.expander(
+        "Processing Data",
+        expanded=False,
+    ):
+        spreadsheet_name = st.session_state.etl_spreadsheet_name.strip()
+        share_email = st.session_state.etl_share_email.strip()
 
-        bom_file = st.file_uploader(
-            "File Excel Bill Of Material",
-            type=UPLOADER_TYPES,
-            key="bom_csv_file",
-            help=(
-                "Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
-                "ke memori, tidak disimpan ke sistem; file Excel dibaca "
-                "langsung, seluruh sheet diproses."
-            ),
-        )
-        sync_upload("bom", bom_file)
-        bom_file_ready = render_upload_status("bom")
+        with st.container(border=True):
+            st.markdown("### Upload Bill Of Material")
 
-        col_bom, col_state = st.columns([1, 2])
-
-        with col_bom:
-            bom_clicked = st.button(
-                "Rekap & Cleaning",
-                type="primary",
-                key="btn_clean_bom",
-                disabled=not bom_file_ready,
-                width="stretch",
+            bom_file = st.file_uploader(
+                "File Excel Bill Of Material",
+                type=UPLOADER_TYPES,
+                key="bom_csv_file",
+                help=(
+                    "Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
+                    "ke memori, tidak disimpan ke sistem; file Excel dibaca "
+                    "langsung, seluruh sheet diproses."
+                ),
             )
+            sync_upload("bom", bom_file)
+            bom_file_ready = render_upload_status("bom")
 
-        with col_state:
-            if bom_clicked:
-                st.caption("Sedang diproses...")
-            elif st.session_state.get("etl_bom_clean") is not None:
-                rekap_note = ""
-                if st.session_state.get("etl_bom_rekap") is not None:
-                    rekap_note = (
-                        f" (dari {len(st.session_state.etl_bom_rekap):,} baris rekap)"
-                    )
-                st.success(
-                    f"BOM selesai direkap & dibersihkan: "
-                    f"{len(st.session_state.etl_bom_clean):,} baris bersih"
-                    f"{rekap_note}."
-                )
-            elif bom_file_ready:
-                st.info("File siap. Tekan tombol untuk memproses.")
-            else:
-                st.caption("Belum ada file BOM.")
-
-        if bom_clicked and st.session_state.get("etl_bom_sources"):
-            run_bom_etl(
-                st.session_state.etl_bom_sources,
-                spreadsheet_name,
-                share_email,
-            )
-
-    # ------------------------------------------------------------
-    # 2. SAP
-    # ------------------------------------------------------------
-
-    with st.container(border=True):
-        st.markdown("### Upload SAP")
-
-        sap_file = st.file_uploader(
-            "File Excel SAP",
-            type=UPLOADER_TYPES,
-            key="sap_csv_file",
-            help=(
-                "CSV atau Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
-                "ke memori, tidak disimpan ke sistem; file Excel dibaca "
-                "langsung, seluruh sheet diproses."
-            ),
-        )
-        sync_upload("sap", sap_file)
-        sap_file_ready = render_upload_status("sap")
-
-        col_sap, col_state = st.columns([1, 2])
-
-        with col_sap:
-            sap_clicked = st.button(
-                "Rekap & Cleaning",
-                type="primary",
-                key="btn_clean_sap",
-                disabled=not sap_file_ready,
-                width="stretch",
-            )
-
-        with col_state:
-            if sap_clicked:
-                st.caption("Sedang diproses...")
-            elif st.session_state.get("etl_sap_clean") is not None:
-                st.success(
-                    f"SAP selesai diproses: "
-                    f"{len(st.session_state.etl_sap_clean):,} baris bersih."
-                )
-            elif sap_file_ready:
-                st.info("File siap. Tekan tombol untuk memproses.")
-            else:
-                st.caption("Belum ada file SAP.")
-
-        if sap_clicked and st.session_state.get("etl_sap_sources"):
-            run_sap_etl(
-                st.session_state.etl_sap_sources,
-                spreadsheet_name,
-                share_email,
-            )
-
-    # ------------------------------------------------------------
-    # 3. GENERATE
-    # ------------------------------------------------------------
-
-    with st.container(border=True):
-        st.markdown("### Generate Data")
-
-        bom_ready = st.session_state.get("etl_bom_clean") is not None
-        sap_ready = st.session_state.get("etl_sap_clean") is not None
-
-        if not (bom_ready and sap_ready):
-            pending = [
-                label
-                for label, ready in (
-                    ("Bill Of Material", bom_ready),
-                    ("SAP", sap_ready),
-                )
-                if not ready
-            ]
-            st.info(
-                "Tombol **Generate Data** muncul setelah kedua dataset "
-                "selesai direkap & dibersihkan. Menunggu: "
-                + ", ".join(pending)
-                + "."
-            )
-        else:
-            col_bom, col_sap, col_gen = st.columns([1, 1, 1])
+            col_bom, col_state = st.columns([1, 2])
 
             with col_bom:
-                st.caption(f"✅ BOM: {len(st.session_state.etl_bom_clean):,} baris")
-            with col_sap:
-                st.caption(f"✅ SAP: {len(st.session_state.etl_sap_clean):,} baris")
-            with col_gen:
-                generate_clicked = st.button(
-                    "⚙️ Generate Data",
+                bom_clicked = st.button(
+                    "Rekap & Cleaning",
                     type="primary",
-                    key="btn_generate",
+                    key="btn_clean_bom",
+                    disabled=not bom_file_ready,
                     width="stretch",
                 )
 
-            if generate_clicked:
-                run_generate(spreadsheet_name, share_email)
+            with col_state:
+                if bom_clicked:
+                    st.caption("Sedang diproses...")
+                elif st.session_state.get("etl_bom_clean") is not None:
+                    rekap_note = ""
+                    if st.session_state.get("etl_bom_rekap") is not None:
+                        rekap_note = (
+                            f" (dari {len(st.session_state.etl_bom_rekap):,} baris rekap)"
+                        )
+                    st.success(
+                        f"BOM selesai direkap & dibersihkan: "
+                        f"{len(st.session_state.etl_bom_clean):,} baris bersih"
+                        f"{rekap_note}."
+                    )
+                elif bom_file_ready:
+                    st.info("File siap. Tekan tombol untuk memproses.")
+                else:
+                    st.caption("Belum ada file BOM.")
 
-            if st.session_state.get("etl_merge") is not None:
-                st.caption(
-                    f"Hasil merge terakhir: "
-                    f"{len(st.session_state.etl_merge):,} baris "
-                    f"di tab '{TAB_MERGE}'."
+            if bom_clicked and st.session_state.get("etl_bom_sources"):
+                run_bom_etl(
+                    st.session_state.etl_bom_sources,
+                    spreadsheet_name,
+                    share_email,
                 )
 
+        # ------------------------------------------------------------
+        # 2. SAP
+        # ------------------------------------------------------------
+
+        with st.container(border=True):
+            st.markdown("### Upload SAP")
+
+            sap_file = st.file_uploader(
+                "File Excel SAP",
+                type=UPLOADER_TYPES,
+                key="sap_csv_file",
+                help=(
+                    "CSV atau Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
+                    "ke memori, tidak disimpan ke sistem; file Excel dibaca "
+                    "langsung, seluruh sheet diproses."
+                ),
+            )
+            sync_upload("sap", sap_file)
+            sap_file_ready = render_upload_status("sap")
+
+            col_sap, col_state = st.columns([1, 2])
+
+            with col_sap:
+                sap_clicked = st.button(
+                    "Rekap & Cleaning",
+                    type="primary",
+                    key="btn_clean_sap",
+                    disabled=not sap_file_ready,
+                    width="stretch",
+                )
+
+            with col_state:
+                if sap_clicked:
+                    st.caption("Sedang diproses...")
+                elif st.session_state.get("etl_sap_clean") is not None:
+                    st.success(
+                        f"SAP selesai diproses: "
+                        f"{len(st.session_state.etl_sap_clean):,} baris bersih."
+                    )
+                elif sap_file_ready:
+                    st.info("File siap. Tekan tombol untuk memproses.")
+                else:
+                    st.caption("Belum ada file SAP.")
+
+            if sap_clicked and st.session_state.get("etl_sap_sources"):
+                run_sap_etl(
+                    st.session_state.etl_sap_sources,
+                    spreadsheet_name,
+                    share_email,
+                )
+
+        # ------------------------------------------------------------
+        # 3. GENERATE
+        # ------------------------------------------------------------
+
+        with st.container(border=True):
+            st.markdown("### Generate Data")
+
+            bom_ready = st.session_state.get("etl_bom_clean") is not None
+            sap_ready = st.session_state.get("etl_sap_clean") is not None
+
+            if not (bom_ready and sap_ready):
+                pending = [
+                    label
+                    for label, ready in (
+                        ("Bill Of Material", bom_ready),
+                        ("SAP", sap_ready),
+                    )
+                    if not ready
+                ]
+                st.info(
+                    "Tombol **Generate Data** muncul setelah kedua dataset "
+                    "selesai direkap & dibersihkan. Menunggu: "
+                    + ", ".join(pending)
+                    + "."
+                )
+            else:
+                col_bom, col_sap, col_gen = st.columns([1, 1, 1])
+
+                with col_bom:
+                    st.caption(f"✅ BOM: {len(st.session_state.etl_bom_clean):,} data")
+                with col_sap:
+                    st.caption(f"✅ SAP: {len(st.session_state.etl_sap_clean):,} data")
+                with col_gen:
+                    generate_clicked = st.button(
+                        "⚙️ Generate Data",
+                        type="primary",
+                        key="btn_generate",
+                        width="stretch",
+                    )
+
+                if generate_clicked:
+                    run_generate(spreadsheet_name, share_email)
+
+                if st.session_state.get("etl_merge") is not None:
+                    st.caption(
+                        f"Hasil merge terakhir: "
+                        f"{len(st.session_state.etl_merge):,} baris "
+                        f"di tab '{TAB_MERGE}'."
+                    )
 
 # ============================================================
 # DASHBOARD
@@ -1452,18 +1516,14 @@ def render_dashboard():
     if merge_full is None:
         st.info(
             "Dashboard tampil setelah langkah **Generate Data** dijalankan. "
-            "Bila hasil sudah pernah dibuat lalu browser di-refresh, muat "
-            "kembali lewat tombol **Muat hasil dari spreadsheet** di "
-            "sidebar."
+            "Setelah browser di-refresh, hasil otomatis dimuat ulang dari "
+            "spreadsheet (sesi baru dibaca sekali saat halaman dibuka). "
+            "Bila belum juga muncul, periksa nama spreadsheet di sidebar "
+            "lalu tekan **Muat hasil dari spreadsheet**."
         )
         return
 
     st.subheader("Dashboard")
-    st.caption(
-        f"Gabungan BOM × SAP: {len(merge_full):,} baris "
-        f"(tab '{TAB_MERGE}', spreadsheet "
-        f"'{st.session_state.etl_spreadsheet_name}')."
-    )
 
     bom_data = st.session_state.etl_bom_clean.copy()
     sap_data = st.session_state.etl_sap_clean.copy()
@@ -1622,9 +1682,35 @@ def render_dashboard():
 # MAIN
 # ============================================================
 
+def auto_restore_awal_sesi() -> None:
+    """Pulihkan hasil ETL otomatis sekali tiap sesi browser.
+
+    Tanpa ini, refresh membuat state kosong lalu dashboard tersembunyi
+    walau hasilnya sudah ada di spreadsheet. Flag sekali-jalan per sesi;
+    setelah Reset ETL tidak dipulihkan lagi (baru lagi setelah refresh).
+    """
+    if st.session_state.get(AUTO_RESTORE_KEY):
+        return
+    st.session_state[AUTO_RESTORE_KEY] = True
+
+    # Sudah terisi (mis. sesi yang baru menjalankan ETL) — jangan ditimpa.
+    if any(
+        st.session_state.get(k) is not None
+        for k in ("etl_bom_clean", "etl_sap_clean", "etl_merge")
+    ):
+        return
+
+    restore_from_spreadsheet(
+        st.session_state.etl_spreadsheet_name.strip(),
+        st.session_state.etl_share_email.strip(),
+        silent=True,
+    )
+
+
 def render():
     st.title("Statistik Dashboard")
 
     render_sidebar()
+    auto_restore_awal_sesi()
     render_pipeline()
     render_dashboard()

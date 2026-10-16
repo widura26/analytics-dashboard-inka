@@ -44,6 +44,27 @@ def caption_text(at: AppTest) -> str:
     return " | ".join(c.value for c in at.caption)
 
 
+def warning_text(at: AppTest) -> str:
+    return " | ".join(w.value for w in at.warning)
+
+
+def build_fake_tabs(at: AppTest) -> dict:
+    """Tiruan isi tab spreadsheet dari state sesi ETL (apa adanya seperti
+    hasil get_all_records — prepare_for_sheets = yang ditulis ke Sheets)."""
+    tabs = {}
+    for key, tab in (
+        ("etl_bom_rekap", mp2.TAB_BOM_REKAP),
+        ("etl_bom_clean", mp2.TAB_BOM_CLEAN),
+        ("etl_sap_clean", mp2.TAB_SAP_CLEAN),
+        ("etl_merge", mp2.TAB_MERGE),
+    ):
+        safe = mp2.prepare_for_sheets(at.session_state[key])
+        tabs[tab] = [
+            dict(zip(safe.columns, row)) for row in safe.values.tolist()
+        ]
+    return tabs
+
+
 def merger_subheaders(at: AppTest):
     return [s.value for s in at.subheader
             if s.value.startswith("Merger of BOM")]
@@ -59,8 +80,12 @@ def test_fresh_page():
     infos = info_text(at)
     assert "Menunggu: Bill Of Material, SAP." in infos, infos
     assert "Dashboard tampil setelah" in infos, infos
+
+    # Auto-restore sesi segar harus diam bila belum ada hasil
+    # (pengguna baru tidak dikasih peringatan membingungkan).
+    assert "Belum ada hasil ETL" not in warning_text(at), warning_text(at)
     print("[OK] halaman kosong: tanpa exception; Generate & dashboard "
-          "menunggu ETL")
+          "menunggu ETL; auto-restore diam bila spreadsheet kosong")
 
 
 def test_full_flow():
@@ -126,7 +151,6 @@ def test_full_flow():
     assert len(at.dataframe) >= 5, len(at.dataframe)
 
     caps = caption_text(at)
-    assert "Gabungan BOM × SAP: 1 baris" in caps, caps
     assert "Hasil merge terakhir: 1 baris" in caps, caps
     print(f"[OK] generate -> 4 tab ditulis; dashboard tampil "
           f"({len(at.dataframe)} dataframe, {len(at.get('plotly_chart'))} "
@@ -209,19 +233,8 @@ def test_restore_from_spreadsheet():
     at1.run()
     assert_no_exception(at1, "sesi #1: generate")
 
-    # 2) Tiru isi tab spreadsheet: rekaman apa adanya seperti hasil
-    #    get_all_records (prepare_for_sheets = apa yang ditulis ke Sheets).
-    tabs = {}
-    for key, tab in (
-        ("etl_bom_rekap", mp2.TAB_BOM_REKAP),
-        ("etl_bom_clean", mp2.TAB_BOM_CLEAN),
-        ("etl_sap_clean", mp2.TAB_SAP_CLEAN),
-        ("etl_merge", mp2.TAB_MERGE),
-    ):
-        safe = mp2.prepare_for_sheets(at1.session_state[key])
-        tabs[tab] = [
-            dict(zip(safe.columns, row)) for row in safe.values.tolist()
-        ]
+    # 2) Tiru isi tab spreadsheet dari state sesi #1.
+    tabs = build_fake_tabs(at1)
 
     # 3) Sesi #2 (setara refresh browser): state kosong, pulihkan dari tab.
     at2 = app_test()
@@ -263,9 +276,42 @@ def test_restore_from_spreadsheet():
           "setelah refresh (tanpa unggah ulang)")
 
 
+def test_auto_restore_setelah_refresh():
+    """Sesi baru TANPA klik apa pun (setara refresh browser): hasil ETL
+    dipulihkan otomatis — dashboard tampil kembali tanpa tombol sidebar."""
+    # 1) Sesi #1: ETL penuh -> bangun isi tab tiruan.
+    at1 = app_test()
+    at1.session_state["bom_bytes"] = BOM_BYTES
+    at1.session_state["sap_bytes"] = SAP_BYTES
+    at1.session_state["simulate_bom"] = True
+    at1.session_state["simulate_sap"] = True
+    at1.run()
+    assert_no_exception(at1, "auto: sesi #1 ETL")
+    at1.session_state["simulate_generate"] = True
+    at1.run()
+    assert_no_exception(at1, "auto: sesi #1 generate")
+    tabs = build_fake_tabs(at1)
+
+    # 2) Sesi #2 = refresh: state kosong, TANPA flag simulate_restore.
+    at2 = app_test()
+    at2.session_state["_fake_tabs"] = tabs
+    at2.run()
+    assert_no_exception(at2, "auto: sesi #2 auto-restore")
+
+    assert at2.session_state.get("etl_merge") is not None
+    # Ringkasan restore menyebut ke-4 tab (tahan perubahan wording).
+    assert "MERGE_BOM_SAP 1 baris" in success_text(at2), \
+        success_text(at2)
+    assert "btn_generate" in button_keys(at2), button_keys(at2)
+    assert len(at2.get("plotly_chart")) == 2, len(at2.get("plotly_chart"))
+    print("[OK] auto-restore: sesi segar memulihkan pipeline & dashboard "
+          "tanpa klik apa pun")
+
+
 if __name__ == "__main__":
     test_fresh_page()
     test_full_flow()
     test_bad_bom_reported()
     test_restore_from_spreadsheet()
+    test_auto_restore_setelah_refresh()
     print("\nSEMUA APP TEST LULUS")

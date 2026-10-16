@@ -848,6 +848,49 @@ def test_retry_transient_habis_percobaan():
     print("[OK] retry: 503 terus-menerus -> 5 percobaan + backoff penuh, lempar")
 
 
+def test_unify_mixed_text():
+    """Kolom object campur teks+angka -> seragam str (pencegah
+    ArrowTypeError 'Expected bytes, got int' saat dataframe ditampilkan)."""
+    df = pd.DataFrame({
+        "kode": ["1000999", 1000999, 1000.0],
+        "spesifikasi": ["teks", 2026, "lain"],
+        "murni_teks": ["a", "b", "c"],
+        "murni_angka": [1, 2, 3],
+        "campur_kosong": [None, "", 42],
+        "qty": [1.5, 2.5, 3.5],
+    })
+
+    out = mp2._unify_mixed_text(df.copy())
+
+    assert out["kode"].tolist() == ["1000999", "1000999", "1000"], \
+        out["kode"].tolist()
+    assert out["spesifikasi"].tolist() == ["teks", "2026", "lain"], \
+        out["spesifikasi"].tolist()
+    assert out["murni_teks"].tolist() == ["a", "b", "c"]
+    assert pd.api.types.is_integer_dtype(out["murni_angka"]), out.dtypes
+    assert out["campur_kosong"].tolist() == [None, "", "42"], \
+        out["campur_kosong"].tolist()
+    assert pd.api.types.is_float_dtype(out["qty"]), out.dtypes
+    print("[OK] _unify_mixed_text: campur -> str; kolom murni tak tersentuh")
+
+
+def test_frame_from_sheet_seragam_teks():
+    """Sel angka yang terselip di kolom teks saat dibaca balik dari
+    Sheets (UNFORMATTED_VALUE) -> dijadikan str oleh frame_from_sheet."""
+    records = [
+        {"Kode Material": 1000999, "Spesifikasi": 2026},
+        {"Kode Material": "9999AAA", "Spesifikasi": "Baja tahan karat"},
+    ]
+
+    df = frame_from_sheet(records)
+
+    assert df["Kode Material"].tolist() == ["1000999", "9999AAA"], \
+        df["Kode Material"].tolist()
+    assert df["Spesifikasi"].tolist() == ["2026", "Baja tahan karat"], \
+        df["Spesifikasi"].tolist()
+    print("[OK] frame_from_sheet: kolom teks tercampur angka -> str seragam")
+
+
 if __name__ == "__main__":
     test_tab_names()
     test_encoding_delimiter()
@@ -880,4 +923,6 @@ if __name__ == "__main__":
     test_retry_transient_gangguan_sementara()
     test_retry_transient_error_permanen()
     test_retry_transient_habis_percobaan()
+    test_unify_mixed_text()
+    test_frame_from_sheet_seragam_teks()
     print("\nSEMUA TEST LULUS")
