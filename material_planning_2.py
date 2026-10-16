@@ -1523,8 +1523,6 @@ def render_dashboard():
         )
         return
 
-    st.subheader("Dashboard")
-
     bom_data = st.session_state.etl_bom_clean.copy()
     sap_data = st.session_state.etl_sap_clean.copy()
 
