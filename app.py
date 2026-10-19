@@ -1,5 +1,6 @@
 import streamlit as st
 
+import bom_firestore
 import material_planning_2 as mp2
 
 
@@ -10,8 +11,13 @@ def fourth():
     mp2.render()
 
 
+def fifth():
+    bom_firestore.render()
+
+
 menus = {
     "Statistic Dashboard": fourth,
+    "Kelola Data BOM": fifth,
 }
 
 
