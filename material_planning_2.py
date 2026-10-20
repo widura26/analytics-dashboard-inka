@@ -808,12 +808,17 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
       etl_{prefix}_src_kind      -- 'csv' | 'xlsx' | ... (ekstensi tanpa titik)
       etl_{prefix}_converted     -- info Excel (daftar sheet, jumlah baris)
       etl_{prefix}_convert_error -- pesan gagal pembacaan
+      etl_{prefix}_sheets        -- sheet tercentang di pemilih sheet
+                                    (lihat render_sheet_picker); ikut
+                                    di-reset supaya file baru tercentang
+                                    semua sheet-anya
     """
     sig_key = f"etl_{prefix}_file_sig"
     sources_key = f"etl_{prefix}_sources"
     kind_key = f"etl_{prefix}_src_kind"
     conv_key = f"etl_{prefix}_converted"
     err_key = f"etl_{prefix}_convert_error"
+    sheets_key = f"etl_{prefix}_sheets"
 
     def clear_all():
         for key in (
@@ -822,6 +827,7 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
             kind_key,
             conv_key,
             err_key,
+            sheets_key,
             f"etl_{prefix}_clean",
             f"etl_{prefix}_stats",
             f"etl_{prefix}_rekap",
@@ -905,6 +911,72 @@ def render_upload_status(prefix: str) -> bool:
         )
 
     return True
+
+
+def render_sheet_picker(prefix: str) -> list:
+    """Pemilih sheet (multiselect) untuk file Excel multi-sheet.
+
+    Dipakai alur BOM: user memcentang sheet mana saja yang ikut tahap
+    Rekap & Cleaning. Mengembalikan daftar sumber terpilih — satu-satunya
+    sumber data yang dikirim ke run_bom_etl.
+
+    File CSV (atau Excel yang hanya punya satu sheet) tidak menampilkan
+    pemilih: seluruh sumber dipakai tanpa syarat.
+
+    Pilihan disimpan di session_state['etl_{prefix}_sheets'] dan di-reset
+    otomatis saat file upload berubah/dihapus (prepare_upload_state),
+    sehingga file baru selalu berawal dengan semua sheet tercentang.
+    Melepas centang hanya menyembunhikan sheet dari hasil rekap — sheet
+    tetap terbaca di memori dan bisa dicentang lagi kapan pun.
+    """
+    sources = st.session_state.get(f"etl_{prefix}_sources") or []
+    key = f"etl_{prefix}_sheets"
+    labels = [src.get("label") or "" for src in sources]
+
+    # Tidak ada pilihan yang bisa ditawarkan (CSV / belum ada file / gagal baca).
+    if len(labels) <= 1:
+        st.session_state[key] = labels
+        return list(sources)
+
+    # Default: semua sheet tercentang. Nilai lama yang sudah tidak ada di
+    # file aktif (sheet di-rename/dihapus) dibersihkan; bila habis semua,
+    # kembali ke default semua sheet.
+    stored = st.session_state.get(key)
+    if stored is None:
+        st.session_state[key] = list(labels)
+    else:
+        valid = [name for name in stored if name in labels]
+        if valid != stored:
+            st.session_state[key] = valid or list(labels)
+
+    selected = st.multiselect(
+        "Sheet yang ikut rekap & cleaning",
+        labels,
+        key=key,
+        help=(
+            "Sheet tercentang akan diproses oleh tombol Rekap & Cleaning. "
+            "Melepas centang hanya menyembunyikan sheet dari hasil rekap; "
+            "centang lagi kapan pun untuk memakainya kembali."
+        ),
+    )
+
+    if not selected:
+        st.info(
+            "Belum ada sheet yang dicentang. Centang minimal satu sheet "
+            "agar tombol Rekap & Cleaning aktif."
+        )
+        return []
+
+    dipilih = set(selected)
+    hasil = [src for src in sources if (src.get("label") or "") in dipilih]
+
+    # Semua sheet terpilih ikut direkap & cleaning — tanpa filter nama
+    # sheet (lihat rekap_sumber_bom).
+    st.caption(
+        f"{len(hasil)}/{len(sources)} sheet dipilih untuk rekap & cleaning."
+    )
+
+    return hasil
 
 
 def write_step_result(tab_name: str, df: pd.DataFrame, spreadsheet_name: str, share_email: str) -> bool:
@@ -1061,20 +1133,26 @@ def _render_single_report(report: dict):
 def rekap_sumber_bom(sources: list):
     """Rekap tiap sumber BOM (algoritma deteksi header fuzzy multi-baris).
 
-    Sumber Excel (dict {'label', 'grid'}) hanya direkap bila nama sheet
-    cocok dengan daftar 29 target algoritma asli
-    (bom_rekap.DAFTAR_SHEET_TARGET); sheet agregat berkolom
-    'Nama Sheet Sumber' dijaga bom_rekap.mendeteksi_output_rekap.
-    Nama sheet Excel yang terpotong (batas 31 karakter) dinormalkan ke
-    nama target penuh, supaya label 'Nama Sheet Sumber' cocok dengan
-    hasil algoritma asli di Colab. Sumber CSV (dict {'label', 'bytes'})
-    direkap tanpa filter nama.
+    SEMUA sumber yang dikirim ikut direkap — tidak ada filter nama sheet
+    (sejak 2026-10-20 rekap tidak lagi terikat daftar 29 sheet target;
+    cakupan ditentukan pemilih sheet di UI). Yang tetap dijaga:
 
-    Mengembalikan (dfs, reports, dilewati, target_terpakai) — murni,
-    tanpa Streamlit/network, supaya mudah diuji.
+    - sheet agregat berkolom 'Nama Sheet Sumber' (bukan BOM mentah)
+      dilewati bom_rekap.mendeteksi_output_rekap agar baris dari sheet
+      sumber tidak terhitung ganda;
+    - sheet yang header-nya gagal terdeteksi / tidak menghasilkan baris
+      dilewati dan masuk 'dilewati'.
+
+    Nama sheet Excel yang terpotong (batas 31 karakter) dinormalkan ke
+    nama target penuh bila cocok dengan daftar 29 nama target
+    (bom_rekap.target_sheet) — itu sekadar penamaan label 'Nama Sheet
+    Sumber' supaya konsisten dengan hasil Colab, BUKAN filter. Sumber
+    CSV (dict {'label', 'bytes'}) direkap dengan label nama file.
+
+    Mengembalikan (dfs, reports, dilewati) — murni, tanpa Streamlit/
+    network, supaya mudah diuji.
     """
     dfs, reports, dilewati = [], [], []
-    target_terpakai = set()
 
     for src in sources:
         label = src.get("label") or "CSV"
@@ -1091,14 +1169,12 @@ def rekap_sumber_bom(sources: list):
                     )
                     continue
 
-                # Hanya 29 sheet target algoritma asli (Colab) yang direkap.
-                target = bom_rekap.target_sheet(label)
-                if target is None:
-                    dilewati.append(f"{label} (di luar daftar 29 sheet target)")
-                    continue
-
-                df_src, report = bom_rekap.rekap_grid(src["grid"], target)
-                target_terpakai.add(target)
+                # Bukan filter: kalau nama sheet cocok dengan salah satu
+                # dari 29 nama target, pakai nama target penuhnya (menangani
+                # nama yang terpotong batas 31 karakter Excel); selain itu
+                # tetap dipakai nama sheet apa adanya.
+                nama_sumber = bom_rekap.target_sheet(label) or label
+                df_src, report = bom_rekap.rekap_grid(src["grid"], nama_sumber)
             else:
                 df_src, report = bom_rekap.rekap_from_bytes(src["bytes"], label)
         except Exception as exc:
@@ -1112,7 +1188,7 @@ def rekap_sumber_bom(sources: list):
         dfs.append(df_src)
         reports.append(report)
 
-    return dfs, reports, dilewati, target_terpakai
+    return dfs, reports, dilewati
 
 
 def run_bom_etl(
@@ -1124,15 +1200,17 @@ def run_bom_etl(
 
     Sumber = dict {'label', 'bytes'} (file CSV) atau {'label', 'grid'}
     (satu sheet Excel — file Excel dibaca langsung per sheet di tahap
-    upload, lihat prepare_upload_state). Tiap sumber di-rekap sendiri
-    lalu digabung, dengan 'Nama Sheet Sumber' = label (nama sheet /
-    nama file) — persis skrip asli yang mengiterasi sheet bom_dataset.
-    Sheet Excel hanya direkap bila namanya cocok dengan daftar 29 sheet
-    target algoritma asli (bom_rekap.DAFTAR_SHEET_TARGET); sisanya
-    dilewati dan dilaporkan. Sheet yang header-nya tidak terdeteksi
-    juga dilewati; sheet berkolom 'Nama Sheet Sumber' (data agregat
-    hasil rekap, mis. tab 'TOTAL BOM' di bom_dataset) dijaga
-    bom_rekap.mendeteksi_output_rekap. Lihat rekap_sumber_bom.
+    upload, lihat prepare_upload_state; sheet yang ikut rekap sudah
+    disaring lebih dulu oleh pemilih sheet, lihat render_sheet_picker).
+    Tiap sumber di-rekap sendiri lalu digabung, dengan 'Nama Sheet Sumber'
+    = label (nama sheet / nama file) — persis skrip asli yang mengiterasi
+    sheet bom_dataset. SEMUA sheet yang dikirim ikut rekap: sejak
+    2026-10-20 tidak ada lagi filter 29 sheet target, jadi pemilih sheet
+    di UI yang menentukan cakupan. Yang tetap dilewati + dilaporkan hanya:
+    sheet yang header-nya gagal terdeteksi / tidak menghasilkan baris,
+    dan sheet agregat berkolom 'Nama Sheet Sumber' (mis. tab 'TOTAL BOM'
+    di bom_dataset) yang dijaga bom_rekap.mendeteksi_output_rekap.
+    Lihat rekap_sumber_bom.
     """
     if not sources:
         st.error("Tidak ada file BOM siap diproses.")
@@ -1151,7 +1229,7 @@ def run_bom_etl(
     # ------------------------------------------------------------
     # TAHAP 1 — REKAP (algoritma deteksi header fuzzy multi-baris)
     # ------------------------------------------------------------
-    dfs, reports, dilewati, target_terpakai = rekap_sumber_bom(sources)
+    dfs, reports, dilewati = rekap_sumber_bom(sources)
 
     if not reports:
         st.error("Rekap BOM gagal: " + "; ".join(dilewati))
@@ -1163,18 +1241,9 @@ def run_bom_etl(
             + "\n".join(f"- {ditem}" for ditem in dilewati)
         )
 
-    # Ringkasan cakupan 29 sheet target (khusus unggahan Excel) —
-    # pembanding langsung untuk audit dengan Google Colab.
-    if any("grid" in s for s in sources):
-        kurang = [
-            t for t in bom_rekap.DAFTAR_SHEET_TARGET if t not in target_terpakai
-        ]
-        st.info(
-            f"Target terpenuhi: "
-            f"{len(bom_rekap.DAFTAR_SHEET_TARGET) - len(kurang)}"
-            f"/{len(bom_rekap.DAFTAR_SHEET_TARGET)} sheet target"
-            + (f" — belum ada di file: {', '.join(kurang)}" if kurang else "")
-        )
+    st.caption(
+        f"{len(reports)} sheet direkap dari {len(sources)} sumber dipilih."
+    )
 
     df_rekap = (
         pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
@@ -1362,11 +1431,13 @@ def render_pipeline():
                 help=(
                     "Excel (.xlsx/.xlsm/.xls/.xlsb). File hanya dibaca "
                     "ke memori, tidak disimpan ke sistem; file Excel dibaca "
-                    "langsung, seluruh sheet diproses."
+                    "langsung per sheet, lalu sheet yang dipilih di bawah "
+                    "yang ikut rekap & cleaning."
                 ),
             )
             sync_upload("bom", bom_file)
             bom_file_ready = render_upload_status("bom")
+            bom_sources = render_sheet_picker("bom")
 
             col_bom, col_state = st.columns([1, 2])
 
@@ -1375,13 +1446,15 @@ def render_pipeline():
                     "Rekap & Cleaning",
                     type="primary",
                     key="btn_clean_bom",
-                    disabled=not bom_file_ready,
+                    disabled=not bom_file_ready or not bom_sources,
                     width="stretch",
                 )
 
             with col_state:
                 if bom_clicked:
                     st.caption("Sedang diproses...")
+                elif bom_file_ready and not bom_sources:
+                    st.caption("Centang minimal satu sheet di atas.")
                 elif st.session_state.get("etl_bom_clean") is not None:
                     rekap_note = ""
                     if st.session_state.get("etl_bom_rekap") is not None:
@@ -1398,9 +1471,9 @@ def render_pipeline():
                 else:
                     st.caption("Belum ada file BOM.")
 
-            if bom_clicked and st.session_state.get("etl_bom_sources"):
+            if bom_clicked and bom_sources:
                 run_bom_etl(
-                    st.session_state.etl_bom_sources,
+                    bom_sources,
                     spreadsheet_name,
                     share_email,
                 )

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 from streamlit.testing.v1 import AppTest
+from streamlit.testing.v1.errors import AppTestError
 
 import material_planning_2 as mp2
 from etl_fixtures import BOM_BYTES, BAD_BOM_BYTES, SAP_BYTES
@@ -68,6 +69,40 @@ def build_fake_tabs(at: AppTest) -> dict:
 def merger_subheaders(at: AppTest):
     return [s.value for s in at.subheader
             if s.value.startswith("Merger of BOM")]
+
+
+def bom_sheet_grid(kode, nama, wbs="A-1.10"):
+    """Grid satu sheet BOM (judul + metadata WBS + header + 1 baris data)."""
+    return [
+        ["REKAP BOM", "", "", ""],
+        [f"Kode WBS: {wbs}", "", "", ""],
+        ["Kode Material", "Material / Komponen", "Stock Total",
+         "Qty / TS (Series)"],
+        [kode, nama, "1250", "10"],
+    ]
+
+
+def pasang_sheet_bom(at: AppTest):
+    """Isi state dua sheet Excel BOM — tiruan hasil prepare_upload_state
+    (AppTest tidak mendukung file_uploader, lihat app_under_test.py)."""
+    at.session_state["etl_bom_sources"] = [
+        {"label": "Interior", "grid": bom_sheet_grid("1000123", "BAUT M8")},
+        {"label": "De-Scoping",
+         "grid": bom_sheet_grid("777001", "PANEL SCOPING", "B-2.20")},
+    ]
+    at.session_state["etl_bom_src_kind"] = "xlsx"
+    at.session_state["etl_bom_converted"] = {
+        "sheets": ["Interior", "De-Scoping"],
+        "rows": {"Interior": 4, "De-Scoping": 4},
+        "total_rows": 8,
+    }
+
+
+def picker_sheet_bom(at: AppTest):
+    """Elemen multiselect pemilih sheet BOM (key 'etl_bom_sheets')."""
+    matches = [m for m in at.multiselect if m.key == "etl_bom_sheets"]
+    assert matches, f"pemilih sheet tidak tampil: {[m.key for m in at.multiselect]}"
+    return matches[0]
 
 
 def test_fresh_page():
@@ -217,6 +252,124 @@ def test_bad_bom_reported():
           f"{at.error[0].value[:80]}...")
 
 
+def test_pilih_sheet_rekap_bom():
+    """User memilih sheet mana saja dari file BOM Excel yang ikut tahap
+    Rekap & Cleaning: default semua sheet, pilihan menyaring hasil, dan
+    tanpa centang tombol tidak memicu ETL."""
+    at = app_test()
+    pasang_sheet_bom(at)
+    at.run()
+    assert_no_exception(at, "pemilih sheet tampil")
+
+    ms = picker_sheet_bom(at)
+    assert ms.options == ["Interior", "De-Scoping"], ms.options
+    assert ms.value == ["Interior", "De-Scoping"], \
+        f"default harus semua sheet, bukan {ms.value}"
+    caps = caption_text(at)
+    assert "2/2 sheet dipilih untuk rekap & cleaning." in caps, caps
+    print("[OK] pemilih sheet: multiselect muncul, default semua sheet "
+          "tercentang")
+
+    # ------------------------------------------------------------
+    # 1. Pilihan default -> KEDUA sheet ikut rekap & cleaning
+    # ------------------------------------------------------------
+    at.button(key="btn_clean_bom").click().run()
+    assert_no_exception(at, "rekap dua sheet")
+
+    rekap = at.session_state["etl_bom_rekap"]
+    assert len(rekap) == 2, len(rekap)
+    assert set(rekap["Nama Sheet Sumber"]) == {"Interior", "De-Scoping"}, \
+        rekap["Nama Sheet Sumber"].tolist()
+    bersih = at.session_state["etl_bom_clean"]["Kode Material"].tolist()
+    assert bersih == ["1000123", "777001"], bersih
+    assert ("TOTAL BOM", 2) in at.session_state["_writes"], \
+        at.session_state["_writes"]
+    print("[OK] pilihan default: kedua sheet direkap (2 baris) & dibersihkan")
+
+    # ------------------------------------------------------------
+    # 2. Pilih satu sheet -> hanya sheet itu yang diproses
+    # ------------------------------------------------------------
+    picker_sheet_bom(at).set_value(["De-Scoping"]).run()
+    assert_no_exception(at, "ubah pilihan sheet")
+    caps = caption_text(at)
+    assert "1/2 sheet dipilih untuk rekap & cleaning." in caps, caps
+
+    at.button(key="btn_clean_bom").click().run()
+    assert_no_exception(at, "rekap satu sheet")
+
+    rekap = at.session_state["etl_bom_rekap"]
+    assert rekap["Nama Sheet Sumber"].tolist() == ["De-Scoping"], \
+        rekap["Nama Sheet Sumber"].tolist()
+    bersih = at.session_state["etl_bom_clean"]["Kode Material"].tolist()
+    assert bersih == ["777001"], bersih
+    assert ("TOTAL BOM", 1) in at.session_state["_writes"], \
+        at.session_state["_writes"]
+    print("[OK] pilih 1 sheet: rekap & cleaning hanya memuat sheet terpilih")
+
+    # ------------------------------------------------------------
+    # 3. Tanpa centang apa pun -> ETL berhenti, hasil lama tidak tertimpa
+    # ------------------------------------------------------------
+    picker_sheet_bom(at).set_value([]).run()
+    assert_no_exception(at, "kosongkan pilihan")
+    assert "Belum ada sheet yang dicentang" in info_text(at), info_text(at)
+    assert "Centang minimal satu sheet di atas." in caption_text(at), \
+        caption_text(at)
+    rekap = at.session_state["etl_bom_rekap"]
+    assert rekap["Nama Sheet Sumber"].tolist() == ["De-Scoping"], \
+        "hasil rekap sebelumnya tidak boleh diganti tanpa sheet terpilih"
+
+    # Tombol nonaktif: browser (dan AppTest) tidak bisa mengkliknya,
+    # sehingga ETL tidak mungkin jalan tanpa minimal satu sheet terpilih.
+    try:
+        at.button(key="btn_clean_bom").click().run()
+    except AppTestError as exc:
+        assert "disabled button" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "tombol Rekap & Cleaning harus nonaktif saat tidak ada sheet "
+            "terpilih"
+        )
+    print("[OK] tanpa centang: peringatan tampil dan tombol Rekap & Cleaning "
+          "nonaktif")
+
+
+def test_rekap_sheet_di_luar_29_target():
+    """Sheet yang NAMANYA bukan salah satu dari 29 nama target (mis.
+    'Komponen') tetap ikut rekap & cleaning — filter itu sudah dilepas
+    (2026-10-20); dulu menghasilkan error 'di luar daftar 29 sheet target'."""
+    at = app_test()
+    at.session_state["etl_bom_sources"] = [
+        {"label": "Komponen",
+         "grid": bom_sheet_grid("555001", "T BOLT", "C-3.30")},
+    ]
+    at.session_state["etl_bom_src_kind"] = "xlsx"
+    at.session_state["etl_bom_converted"] = {
+        "sheets": ["Komponen"],
+        "rows": {"Komponen": 4},
+        "total_rows": 4,
+    }
+    at.run()
+    assert_no_exception(at, "sheet non-target tampil di UI")
+    assert "di luar daftar 29 sheet target" not in warning_text(at), \
+        warning_text(at)
+
+    at.button(key="btn_clean_bom").click().run()
+    assert_no_exception(at, "rekap sheet non-target")
+    assert not at.error, [e.value for e in at.error]
+
+    rekap = at.session_state["etl_bom_rekap"]
+    assert rekap["Nama Sheet Sumber"].tolist() == ["Komponen"], \
+        rekap["Nama Sheet Sumber"].tolist()
+    bersih = at.session_state["etl_bom_clean"]["Kode Material"].tolist()
+    assert bersih == ["555001"], bersih
+    assert "1 sheet direkap dari 1 sumber dipilih." in caption_text(at), \
+        caption_text(at)
+    assert ("TOTAL BOM", 1) in at.session_state["_writes"], \
+        at.session_state["_writes"]
+    print("[OK] sheet di luar 29 nama target ('Komponen') direkap & "
+          "dibersihkan tanpa error")
+
+
 def test_restore_from_spreadsheet():
     """Setelah refresh browser (sesi baru, state kosong), tombol sidebar
     'Muat hasil dari spreadsheet' membaca 4 tab -> pipeline & dashboard
@@ -312,6 +465,8 @@ if __name__ == "__main__":
     test_fresh_page()
     test_full_flow()
     test_bad_bom_reported()
+    test_pilih_sheet_rekap_bom()
+    test_rekap_sheet_di_luar_29_target()
     test_restore_from_spreadsheet()
     test_auto_restore_setelah_refresh()
     print("\nSEMUA APP TEST LULUS")

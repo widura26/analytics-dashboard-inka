@@ -101,14 +101,14 @@ KOLOM_CONFIG = [
     {
         "key": "qty_pr_total",
         "label": "QTY PR TOTAL",
-        "keywords": ["qty pr total", "total pr"],
+        "keywords": ["qty pr total", "total pr", "total"],
         "threshold": 70,
         "type": "number",
     },
     {
         "key": "bom",
         "label": "BOM",
-        "keywords": ["bom", "bill of materials"],
+        "keywords": ["bom", "bill of materials", "group"],
         "threshold": 75,
         "type": "text",
     },
@@ -163,11 +163,16 @@ def normalize_compact(text):
 
 
 # ============================================================
-# 2b. DAFTAR 29 SHEET TARGET (algoritma asli / Colab)
+# 2b. DAFTAR 29 NAMA SHEET (algoritma asli / Colab)
 # ============================================================
 
-# Hanya sheet yang namanya cocok dengan daftar ini yang direkap —
-# persis cakupan skrip asli (recap.py / notebook Google Colab).
+# Daftar nama sheet yang dulu menjadi cakupan rekap skrip asli
+# (recap.py / notebook Google Colab). SEJAK 2026-10-20 daftar ini bukan
+# lagi filter: semua sheet yang dipilih user ikut direkap (lihat
+# material_planning_2.rekap_sumber_bom). Fungsinya sekarang sekadar
+# normalisasi NAMA — sheet Excel terpotong (batas 31 karakter) dipetakan
+# ke nama penuhnya lewat target_sheet(), supaya label 'Nama Sheet Sumber'
+# konsisten dengan hasil Colab.
 DAFTAR_SHEET_TARGET = [
     "Elektrik + Pre Series", "De-Scoping", "Interior", "TMS", "CKD VVVF",
     "CKD Pantograph", "CKD SIV", "Elektrik", "Komponen Utama", "Sistem Mekanik",
@@ -191,7 +196,11 @@ _MIN_PANJANG_PREFIKS = 20
 
 
 def target_sheet(nama: str):
-    """Nama target yang cocok dengan `nama` sheet, atau None bila bukan target."""
+    """Salah satu dari 29 nama target yang cocok dengan `nama`, atau None.
+
+    Bukan filter rekap — bila None, pemakai memakai `nama` sheet apa
+    adanya (lihat material_planning_2.rekap_sumber_bom).
+    """
     kunci = normalize_compact(nama)
     if not kunci:
         return None
@@ -208,7 +217,7 @@ def target_sheet(nama: str):
 
 
 def nama_sheet_target(nama: str) -> bool:
-    """True bila `nama` sheet termasuk daftar 29 sheet target."""
+    """True bila `nama` cocok dengan salah satu dari 29 nama target."""
     return target_sheet(nama) is not None
 
 

@@ -17,7 +17,8 @@ import pandas as pd
 import bom_rekap
 import material_planning_2 as mp2
 from etl_fixtures import (
-    BOM_BYTES, BOM_HEADER, BOM_ROWS, SAP_HEADER, SAP_ROWS, to_csv,
+    BOM_BYTES, BOM_HEADER, BOM_ROWS, SAP_HEADER, SAP_ROWS, FakeUpload,
+    to_csv,
 )
 from csv_utils import grid_to_dataframe
 from excel_convert import is_excel_file, read_excel_sheets
@@ -510,7 +511,8 @@ def test_mendeteksi_output_rekap():
 
 
 def test_daftar_target_sheet():
-    """Cakupan rekap = 29 sheet target algoritma asli (Colab)."""
+    """29 nama target (Colab) — sejak 2026-10-20 dipakai untuk
+    normalisasi nama sheet, BUKAN untuk memfilter rekap."""
     # cocok persis (normalisasi besar/kecil, spasi, tanda hubung)
     assert bom_rekap.nama_sheet_target("De-Scoping")
     assert bom_rekap.nama_sheet_target("de  scoping")
@@ -521,17 +523,20 @@ def test_daftar_target_sheet():
     assert bom_rekap.target_sheet("Tools & Consumable Tools Perba") == \
         "Tools & Consumable Tools Perbaikan"
 
-    # di luar daftar
+    # bukan target -> None (bukan berarti ditolak; pemakai memakai nama
+    # sheet apa adanya, lihat rekap_sumber_bom)
     assert not bom_rekap.nama_sheet_target("Review Bogie")
     assert not bom_rekap.nama_sheet_target("Sheet48")
     assert not bom_rekap.nama_sheet_target("TOTAL BOM")
     assert not bom_rekap.nama_sheet_target("Consumable Pre")
-    print("[OK] daftar 29 target: cocok persis, tahan potongan, tolak non-target")
+    assert not bom_rekap.nama_sheet_target("Komponen")
+    print("[OK] 29 nama target: cocok persis, tahan potongan, bukan filter rekap")
 
 
-def test_rekap_sumber_bom_target_filter():
-    """rekap_sumber_bom: hanya sheet target yang direkap; non-target dan
-    sheet agregat dilewati + dilaporkan; label memakai nama target penuh."""
+def test_rekap_sumber_bom_tanpa_filter_target():
+    """rekap_sumber_bom: SEMUA sheet ikut direkap — tidak ada lagi filter
+    29 sheet target (2026-10-20). Sheet agregat tetap dilewati, dan label
+    sheet terpotong tetap dinormalkan ke nama target penuh."""
     artefak = [
         ["Nama Sheet Sumber", "Kode Material", "Material / Komponen",
          "Qty / TS (Series)"],
@@ -539,22 +544,29 @@ def test_rekap_sumber_bom_target_filter():
     ]
     sources = [
         {"label": "Interior", "grid": BOM_GRID},                       # target
-        {"label": "Tools & Consumable Tools Perba", "grid": BOM_GRID}, # potong
+        {"label": "Tools & Consumable Tools Perba", "grid": BOM_GRID}, # terpotong
         {"label": "Review Bogie", "grid": BOM_GRID},                   # non-target
+        {"label": "Komponen", "grid": BOM_GRID},                       # non-target
         {"label": "TOTAL BOM", "grid": artefak},                       # agregat
     ]
-    dfs, reports, dilewati, terpakai = rekap_sumber_bom(sources)
+    dfs, reports, dilewati = rekap_sumber_bom(sources)
 
-    assert len(dfs) == 2, f"hanya 2 sheet target direkap, bukan {len(dfs)}"
-    # 'Nama Sheet Sumber' memakai nama target penuh (bukan label terpotong)
+    # 4 sheet mentah direkap, termasuk 2 yang di luar 29 nama target
+    assert len(dfs) == 4, f"harus 4 sheet direkap, bukan {len(dfs)}"
+    assert len(reports) == 4, len(reports)
+    # label: target cocok persis / terpotong -> nama penuh; sisanya apa adanya
     assert set(dfs[0]["Nama Sheet Sumber"]) == {"Interior"}
     assert set(dfs[1]["Nama Sheet Sumber"]) == {
         "Tools & Consumable Tools Perbaikan"
     }
-    assert terpakai == {"Interior", "Tools & Consumable Tools Perbaikan"}
-    assert any("di luar daftar 29 sheet target" in d for d in dilewati)
-    assert any("Nama Sheet Sumber" in d for d in dilewati)
-    print("[OK] rekap_sumber_bom: filter 29 target + normalisasi nama potong")
+    assert set(dfs[2]["Nama Sheet Sumber"]) == {"Review Bogie"}
+    assert set(dfs[3]["Nama Sheet Sumber"]) == {"Komponen"}
+    # hanya sheet agregat yang dilewati (mencegah baris ganda)
+    assert len(dilewati) == 1, dilewati
+    assert "Nama Sheet Sumber" in dilewati[0], dilewati
+    assert not any("29 sheet target" in d for d in dilewati), dilewati
+    print("[OK] rekap_sumber_bom: tanpa filter 29 target; agregat tetap "
+          "dilewati; nama terpotong dinormalkan")
 
 
 def test_prepare_upload_state():
@@ -626,6 +638,41 @@ def test_prepare_upload_state():
     assert state3.get("etl_sap_sources") is None
     assert "etl_sap_convert_error" in state3
     print("[OK] prepare_upload_state: cache, invalidasi, Excel multi-sheet, error rusak")
+
+
+def test_pilih_sheet_reset_state():
+    """Pemilih sheet BOM (etl_bom_sheets): pilihan bertahan selama file
+    yang sama, dan di-reset saat file berganti/dihapus — supaya file baru
+    selalu berawal dengan SEMUA sheet tercentang (default)."""
+    workbook = xlsx_sheets({"Interior": BOM_GRID, "De-Scoping": BOM_GRID})
+    state = {}
+
+    prepare_upload_state(state, "bom", FakeUpload("bom.xlsx", workbook))
+    assert [s["label"] for s in state["etl_bom_sources"]] == [
+        "Interior", "De-Scoping"
+    ], state["etl_bom_sources"]
+    assert "etl_bom_sheets" not in state, \
+        "belum ada pilihan -> render_sheet_picker mengisi default semua sheet"
+
+    # File yang sama diproses ulang (cache) -> pilihan & hasil tidak di-reset
+    state["etl_bom_sheets"] = ["Interior"]
+    state["etl_bom_clean"] = "lama"
+    prepare_upload_state(state, "bom", FakeUpload("bom.xlsx", workbook))
+    assert state["etl_bom_sheets"] == ["Interior"], state["etl_bom_sheets"]
+    assert state["etl_bom_clean"] == "lama", "cache file sama tidak boleh hapus hasil"
+
+    # File berganti -> pilihan lama (nama sheet lama) ikut dibersihkan
+    prepare_upload_state(state, "bom", FakeUpload("bom_v2.xlsx", workbook))
+    assert state["etl_bom_sources"], "sumber file baru harus terbaca"
+    assert "etl_bom_sheets" not in state, state.get("etl_bom_sheets")
+    assert "etl_bom_clean" not in state
+
+    # File dihapus -> pilihan ikut hilang
+    state["etl_bom_sheets"] = ["Interior"]
+    prepare_upload_state(state, "bom", None)
+    assert "etl_bom_sheets" not in state, state.get("etl_bom_sheets")
+    assert "etl_bom_sources" not in state
+    print("[OK] pemilih sheet: reset pilihan saat file berubah / dihapus")
 
 
 def test_frame_from_sheet():
@@ -913,8 +960,9 @@ if __name__ == "__main__":
     test_grid_to_dataframe()
     test_mendeteksi_output_rekap()
     test_daftar_target_sheet()
-    test_rekap_sumber_bom_target_filter()
+    test_rekap_sumber_bom_tanpa_filter_target()
     test_prepare_upload_state()
+    test_pilih_sheet_reset_state()
     test_frame_from_sheet()
     test_tulis_besar_terpecah_blok()
     test_tulis_kecil_satu_request()
