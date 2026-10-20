@@ -4,40 +4,40 @@ import bom_firestore
 import material_planning_2 as mp2
 
 
-st.set_page_config(layout="wide")
+st.set_page_config(
+    page_title="Analytics Dashboard INKA",
+    layout="wide",
+)
 
 
-def fourth():
+def page_statistic_dashboard():
     mp2.render()
 
 
-def fifth():
+def page_kelola_data_bom():
     bom_firestore.render()
 
 
-menus = {
-    "Statistic Dashboard": fourth,
-    "Kelola Data BOM": fifth,
-}
+pages = [
+    st.Page(
+        page_statistic_dashboard,
+        title="Statistic Dashboard",
+        icon=":material/monitoring:",
+        url_path="statistic-dashboard",
+        default=True,
+    ),
+    st.Page(
+        page_kelola_data_bom,
+        title="Kelola Data BOM",
+        icon=":material/factory:",
+        url_path="kelola-data-bom",
+    ),
+]
 
+navigation = st.navigation(
+    {"Menu": pages},
+    position="sidebar",
+    expanded=True,
+)
 
-def select_menu(label: str):
-    st.session_state.menu = label
-
-
-if st.session_state.get("menu") not in menus:
-    st.session_state.menu = next(iter(menus))
-
-with st.sidebar:
-    st.subheader("Menu")
-    for label in menus:
-        st.button(
-            label,
-            key=f"menu_{label}",
-            width="stretch",
-            type="primary" if st.session_state.menu == label else "secondary",
-            on_click=select_menu,
-            args=(label,),
-        )
-
-menus[st.session_state.menu]()
+navigation.run()
