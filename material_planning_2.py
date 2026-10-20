@@ -799,7 +799,9 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
 
     - CSV  -> satu sumber berisi bytes asli.
     - Excel-> SEMUA sheet dibaca langsung menjadi grid sel (tanpa konversi
-      CSV), satu sumber per sheet, label = nama sheet.
+      CSV), satu sumber per sheet, label = nama sheet, plus 'tandai' =
+      baris berformat (tersembunyi/collapse, dicoret, blok gelap) yang
+      nanti tidak ikut rekap (lihat bom_rekap.rekap_grid).
 
     state: mapping mirip session_state (dict biasa saat unit test).
     Kunci yang ditulis:
@@ -859,7 +861,13 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
                 date_format=SAP_DATE_FORMAT,
             )
             state[sources_key] = [
-                {"label": sheet["label"], "grid": sheet["grid"]}
+                {
+                    "label": sheet["label"],
+                    "grid": sheet["grid"],
+                    # baris ditandai di Excel (hidden/collapse, dicoret,
+                    # blok gelap) -> tidak ikut rekap, lihat rekap_sumber_bom
+                    "tandai": sheet.get("tandai") or {},
+                }
                 for sheet in sheets
             ]
             state[kind_key] = file_suffix(uploaded.name)
@@ -1006,6 +1014,42 @@ def render_stats(stats: dict):
     cols[3].metric("Baris tidak valid", f"{stats.get('invalid_rows', 0):,}")
 
 
+def pesan_baris_tandai(reports: list):
+    """Teks info "N baris ditandai di Excel tidak ikut rekap" (per sheet +
+    rincian alasan). None bila tidak ada baris ber-tanda.
+
+    Baris ber-tanda = tersembunyi/collapse, dicoret, atau diblok gelap di
+    file Excel (lihat excel_convert._pindai_tandai_sheet). Pengguna memakai
+    format itu sebagai penanda "sudah dibatalkan", jadi barisnya memang
+    tidak boleh ikut rekap — tapi tetap dilaporkan supaya bisa diaudit.
+    """
+    rinci = [
+        (r["source_label"], r.get("rows_skipped_marked", 0),
+         r.get("mark_summary") or {})
+        for r in reports
+    ]
+    rinci = [item for item in rinci if item[1]]
+    if not rinci:
+        return None
+
+    total = sum(n for _, n, _ in rinci)
+    alasan = {}
+    for _, _, summary in rinci:
+        for kunci, nilai in summary.items():
+            alasan[kunci] = alasan.get(kunci, 0) + nilai
+    teks_alasan = ", ".join(
+        f"{nilai} {kunci}" for kunci, nilai in alasan.items()
+    )
+    per_sheet = ", ".join(f"{label} ({n})" for label, n, _ in rinci)
+
+    return (
+        f"{total} baris ditandai di Excel tidak ikut rekap "
+        f"[{teks_alasan}]. Per sheet: {per_sheet}. "
+        "Baris dianggap ditandai bila tersembunyi/collapse, dicoret, "
+        "atau diblok warna hitam/gelap di file Excel."
+    )
+
+
 def render_rekap_report(reports: list):
     """Ringkasan tahap rekap (deteksi header + ekstraksi).
 
@@ -1022,7 +1066,10 @@ def render_rekap_report(reports: list):
 
     total_extracted = sum(r["rows_extracted"] for r in reports)
     total_skipped = sum(
-        r["rows_skipped_empty"] + r["rows_skipped_ignored"] for r in reports
+        r["rows_skipped_empty"]
+        + r["rows_skipped_ignored"]
+        + r.get("rows_skipped_marked", 0)
+        for r in reports
     )
     detected = [r["detected_fields"] for r in reports]
     total_fields = reports[0]["total_fields"]
@@ -1048,13 +1095,20 @@ def render_rekap_report(reports: list):
                 ),
                 "Field": f"{r['detected_fields']}/{r['total_fields']}",
                 "Direkap": r["rows_extracted"],
+                "Ditandai": r.get("rows_skipped_marked", 0),
                 "Dilewati": (
-                    r["rows_skipped_empty"] + r["rows_skipped_ignored"]
+                    r["rows_skipped_empty"]
+                    + r["rows_skipped_ignored"]
+                    + r.get("rows_skipped_marked", 0)
                 ),
                 "Kode WBS": wbs,
             }
         )
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+    pesan_tandai = pesan_baris_tandai(reports)
+    if pesan_tandai:
+        st.info(pesan_tandai)
 
     no_wbs = [
         r["source_label"]
@@ -1084,6 +1138,12 @@ def render_rekap_report(reports: list):
 
 def _render_single_report(report: dict):
     """Tampilan rinci report rekap untuk satu sumber (satu file)."""
+    dilewati = (
+        report["rows_skipped_empty"]
+        + report["rows_skipped_ignored"]
+        + report.get("rows_skipped_marked", 0)
+    )
+
     cols = st.columns(4)
     cols[0].metric("Baris direkap", f"{report['rows_extracted']:,}")
     cols[1].metric("Baris header", report["header_row_count"])
@@ -1091,10 +1151,7 @@ def _render_single_report(report: dict):
         "Field terdeteksi",
         f"{report['detected_fields']}/{report['total_fields']}",
     )
-    cols[3].metric(
-        "Baris dilewati",
-        f"{report['rows_skipped_empty'] + report['rows_skipped_ignored']:,}",
-    )
+    cols[3].metric("Baris dilewati", f"{dilewati:,}")
 
     if report["source_from_column"]:
         sumber = "kolom 'Nama Sheet Sumber' di CSV"
@@ -1110,6 +1167,10 @@ def _render_single_report(report: dict):
         f"({report['header_row_count']} baris)  |  Kode WBS: {wbs}  |  "
         f"Nama sheet sumber: {sumber}."
     )
+
+    pesan_tandai = pesan_baris_tandai([report])
+    if pesan_tandai:
+        st.info(pesan_tandai)
 
     if not report["wbs_from_column"] and not report["wbs"]:
         st.warning(
@@ -1141,7 +1202,10 @@ def rekap_sumber_bom(sources: list):
       dilewati bom_rekap.mendeteksi_output_rekap agar baris dari sheet
       sumber tidak terhitung ganda;
     - sheet yang header-nya gagal terdeteksi / tidak menghasilkan baris
-      dilewati dan masuk 'dilewati'.
+      dilewati dan masuk 'dilewati';
+    - baris yang ditandai orang di Excel (tersembunyi/collapse, dicoret,
+      blok gelap) tidak ikut rekap — rinciannya di report
+      ('rows_skipped_marked' + 'mark_summary').
 
     Nama sheet Excel yang terpotong (batas 31 karakter) dinormalkan ke
     nama target penuh bila cocok dengan daftar 29 nama target
@@ -1174,7 +1238,11 @@ def rekap_sumber_bom(sources: list):
                 # nama yang terpotong batas 31 karakter Excel); selain itu
                 # tetap dipakai nama sheet apa adanya.
                 nama_sumber = bom_rekap.target_sheet(label) or label
-                df_src, report = bom_rekap.rekap_grid(src["grid"], nama_sumber)
+                df_src, report = bom_rekap.rekap_grid(
+                    src["grid"],
+                    nama_sumber,
+                    abaikan=src.get("tandai"),
+                )
             else:
                 df_src, report = bom_rekap.rekap_from_bytes(src["bytes"], label)
         except Exception as exc:

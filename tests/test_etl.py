@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import gspread
 import pandas as pd
+from openpyxl import load_workbook
+from openpyxl.styles import Font, PatternFill
 
 import bom_rekap
 import material_planning_2 as mp2
@@ -364,6 +366,37 @@ def xlsx_sheets(sheets: dict) -> bytes:
     return buf.getvalue()
 
 
+def xlsx_dengan_tanda(sheets: dict, tanda: dict) -> bytes:
+    """xlsx_sheets + format penanda per baris (nomor baris Excel 1-based).
+
+    tanda = {nama_sheet: {nomor_baris: [jenis, ...]}} dengan jenis:
+      'hidden' -> baris disembunyikan (group collapse)
+      'strike' -> font dicoret (strikethrough)
+      'fill'   -> sel diblok hitam pekat
+    """
+    raw = xlsx_sheets(sheets)
+    workbook = load_workbook(io.BytesIO(raw))
+
+    for nama, baris_tanda in tanda.items():
+        worksheet = workbook[nama]
+        for nomor, jenis_list in baris_tanda.items():
+            for jenis in jenis_list:
+                if jenis == "hidden":
+                    worksheet.row_dimensions[nomor].hidden = True
+                elif jenis == "strike":
+                    for cell in worksheet[nomor]:
+                        cell.font = Font(strike=True)
+                elif jenis == "fill":
+                    for cell in worksheet[nomor]:
+                        cell.fill = PatternFill("solid", fgColor="FF000000")
+                else:
+                    raise ValueError(f"jenis tanda tak dikenal: {jenis}")
+
+    buf = io.BytesIO()
+    workbook.save(buf)
+    return buf.getvalue()
+
+
 BOM_GRID = [
     ["REKAP BOM EXCEL", "", "", ""],                 # baris judul
     ["Kode WBS: A-1.10", "", "", ""],                # baris metadata WBS
@@ -567,6 +600,97 @@ def test_rekap_sumber_bom_tanpa_filter_target():
     assert not any("29 sheet target" in d for d in dilewati), dilewati
     print("[OK] rekap_sumber_bom: tanpa filter 29 target; agregat tetap "
           "dilewati; nama terpotong dinormalkan")
+
+
+# Grid BOM dengan 4 baris data: idx 3 normal, idx 4 dicoret,
+# idx 5 blok hitam, idx 6 tersembunyi (Excel row 4..7).
+TANDA_GRID = [
+    ["REKAP BOM", "", "", ""],
+    ["Kode WBS: A-1.10", "", "", ""],
+    ["Kode Material", "Material / Komponen", "Stock Total",
+     "Qty / TS (Series)"],
+    ["1000123", "BAUT NORMAL", "1250", "10"],
+    ["1000456", "BARIS DICORET", "5", "2"],
+    ["1000789", "BARIS BLOK HITAM", "6", "3"],
+    ["1000999", "BARIS HIDDEN", "7", "4"],
+]
+
+# Penanda per nomor baris Excel (1-based).
+TANDA_EXCEL = {"Interior": {5: ["strike"], 6: ["fill"], 7: ["hidden"]}}
+
+
+def test_baca_tandai_baris():
+    """excel_convert: baris tersembunyi/collapse, dicoret, dan blok hitam
+    terbaca sebagai 'tandai' (indeks 0-based, selaras dengan grid); file
+    tanpa penanda -> tandai kosong (perilaku lama)."""
+    raw = xlsx_dengan_tanda({"Interior": TANDA_GRID}, TANDA_EXCEL)
+    sheet = read_excel_sheets(raw, "bom.xlsx")[0]
+
+    assert sheet["rows"] == len(TANDA_GRID), sheet["rows"]
+    assert sheet["label"] == "Interior", sheet["label"]
+
+    tandai = sheet["tandai"]
+    assert set(tandai) == {4, 5, 6}, tandai          # idx 0-based = Excel row - 1
+    assert tandai[4] == ["dicoret"], tandai
+    assert tandai[5] == ["blok gelap"], tandai
+    assert tandai[6] == ["tersembunyi/collapse"], tandai
+    # baris judul, metadata WBS, header, dan data normal TIDAK ditandai
+    assert 0 not in tandai and 3 not in tandai, tandai
+
+    # file tanpa format penanda -> kosong (dan grid tetap terbaca utuh)
+    bersih = read_excel_sheets(xlsx_bytes(TANDA_GRID), "bom.xlsx")[0]
+    assert bersih["tandai"] == {}, bersih["tandai"]
+    assert bersih["grid"][3][0] == "1000123", bersih["grid"][3]
+    print("[OK] baca_tandai_baris: hidden/collapse + dicoret + blok hitam "
+          "terdeteksi; file bersih -> tandai kosong")
+
+
+def test_rekap_grid_lewati_baris_tandai():
+    """rekap_grid(abaikan=...): baris ber-tanda TIDAK ikut rekap, jumlah +
+    alasan tercatat di report; baris normal tetap; tanpa abaikan -> semua
+    baris direkap (perilaku lama persis)."""
+    abaikan = {
+        4: ["dicoret"],
+        5: ["blok gelap"],
+        6: ["tersembunyi/collapse"],
+    }
+
+    df, report = bom_rekap.rekap_grid(TANDA_GRID, "Interior", abaikan=abaikan)
+    assert df["Kode Material"].tolist() == ["1000123"], df["Kode Material"]
+    assert report["rows_extracted"] == 1, report["rows_extracted"]
+    assert report["rows_skipped_marked"] == 3, report["rows_skipped_marked"]
+    assert report["mark_summary"] == {
+        "dicoret": 1, "blok gelap": 1, "tersembunyi/collapse": 1,
+    }, report["mark_summary"]
+    assert report["rows_skipped_empty"] == 0, report
+
+    # default tanpa abaikan: seluruh baris data direkap seperti dulu
+    df_all, report_all = bom_rekap.rekap_grid(TANDA_GRID, "Interior")
+    assert len(df_all) == 4, len(df_all)
+    assert report_all["rows_skipped_marked"] == 0, report_all
+
+    # indeks baris header / di luar jangkauan tidak dihitung sebagai
+    # baris ditandai (header tetap dipakai untuk deteksi)
+    _, report_aman = bom_rekap.rekap_grid(
+        TANDA_GRID, "Interior", abaikan={0: ["dicoret"], 99: ["hidden"]}
+    )
+    assert report_aman["rows_extracted"] == 4, report_aman["rows_extracted"]
+    assert report_aman["rows_skipped_marked"] == 0, report_aman
+
+    # rekap_sumber_bom meneruskan 'tandai' dari sumber Excel
+    sources = [
+        {"label": "Interior", "grid": TANDA_GRID,
+         "tandai": {4: ["dicoret"], 5: ["blok gelap"],
+                    6: ["tersembunyi/collapse"]}},
+        {"label": "De-Scoping", "grid": TANDA_GRID},
+    ]
+    dfs, reports, dilewati = rekap_sumber_bom(sources)
+    assert len(dfs) == 2, len(dfs)
+    assert reports[0]["rows_skipped_marked"] == 3, reports[0]
+    assert reports[1]["rows_skipped_marked"] == 0, reports[1]
+    assert not dilewati, dilewati
+    print("[OK] rekap_grid: baris hidden/dicoret/blok dilewati + dilaporkan; "
+          "tanpa abaikan = perilaku lama")
 
 
 def test_prepare_upload_state():
@@ -961,6 +1085,8 @@ if __name__ == "__main__":
     test_mendeteksi_output_rekap()
     test_daftar_target_sheet()
     test_rekap_sumber_bom_tanpa_filter_target()
+    test_baca_tandai_baris()
+    test_rekap_grid_lewati_baris_tandai()
     test_prepare_upload_state()
     test_pilih_sheet_reset_state()
     test_frame_from_sheet()

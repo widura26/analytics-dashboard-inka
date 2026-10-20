@@ -333,6 +333,47 @@ def test_pilih_sheet_rekap_bom():
           "nonaktif")
 
 
+def test_lewati_baris_berformat():
+    """Baris yang ditandai orang di Excel (tersembunyi/collapse, dicoret,
+    blok hitam) TIDAK ikut rekap & cleaning, dan jumlahnya dilaporkan
+    supaya bisa diaudit."""
+    at = app_test()
+    grid = bom_sheet_grid("1000123", "BAUT M8")
+    grid.append(["1000456", "BARIS DICORET", "999", "7"])   # idx 4
+    at.session_state["etl_bom_sources"] = [
+        {"label": "Interior", "grid": grid, "tandai": {4: ["dicoret"]}},
+    ]
+    at.session_state["etl_bom_src_kind"] = "xlsx"
+    at.session_state["etl_bom_converted"] = {
+        "sheets": ["Interior"],
+        "rows": {"Interior": len(grid)},
+        "total_rows": len(grid),
+    }
+    at.run()
+    assert_no_exception(at, "sumber bertanda tampil")
+
+    at.button(key="btn_clean_bom").click().run()
+    assert_no_exception(at, "rekap baris bertanda")
+
+    rekap = at.session_state["etl_bom_rekap"]
+    assert rekap["Kode Material"].tolist() == ["1000123"], \
+        rekap["Kode Material"].tolist()
+    report = at.session_state["etl_bom_rekap_report"][0]
+    assert report["rows_skipped_marked"] == 1, report
+    assert report["mark_summary"] == {"dicoret": 1}, report["mark_summary"]
+    assert report["rows_extracted"] == 1, report
+
+    info = info_text(at)
+    assert "1 baris ditandai di Excel tidak ikut rekap" in info, info
+    assert "[1 dicoret]" in info, info
+    assert "Interior (1)" in info, info
+
+    bersih = at.session_state["etl_bom_clean"]["Kode Material"].tolist()
+    assert bersih == ["1000123"], bersih
+    print("[OK] baris ditandai (dicoret/hidden/blok) tidak ikut rekap & "
+          "cleaning; jumlah + alasan dilaporkan")
+
+
 def test_rekap_sheet_di_luar_29_target():
     """Sheet yang NAMANYA bukan salah satu dari 29 nama target (mis.
     'Komponen') tetap ikut rekap & cleaning — filter itu sudah dilepas
@@ -467,6 +508,7 @@ if __name__ == "__main__":
     test_bad_bom_reported()
     test_pilih_sheet_rekap_bom()
     test_rekap_sheet_di_luar_29_target()
+    test_lewati_baris_berformat()
     test_restore_from_spreadsheet()
     test_auto_restore_setelah_refresh()
     print("\nSEMUA APP TEST LULUS")

@@ -481,10 +481,33 @@ def find_header_column(header_columns, wanted: set):
 # 6. REKAP DARI GRID CSV
 # ============================================================
 
-def rekap_grid(data, source_label: str = ""):
-    """Rekap satu grid sel CSV. Mengembalikan (DataFrame, report)."""
+def rekap_grid(data, source_label: str = "", abaikan: dict = None):
+    """Rekap satu grid sel CSV. Mengembalikan (DataFrame, report).
+
+    abaikan = {baris 0-based: [alasan, ...]} — baris yang ditandai orang di
+    file Excel (tersembunyi/collapse, dicoret, blok gelap) sehingga tidak
+    boleh ikut rekap (lihat excel_convert.read_excel_sheets). Hanya baris
+    DATA yang dibuang; baris header tetap dipakai untuk deteksi header.
+    Tiap baris yang dilewati karena tanda tercatat di report
+    (rows_skipped_marked + mark_summary) supaya bisa diaudit.
+
+    File CSV tidak punya format sel -> abaikan None (perilaku lama persis).
+    """
     if not data:
         raise ValueError("File CSV tidak memiliki baris data.")
+
+    # Normalisasi: terima dict alasan, set/list indeks polos, atau None.
+    if not abaikan:
+        abaikan = {}
+    elif not isinstance(abaikan, dict):
+        abaikan = {int(idx): [] for idx in abaikan}
+    else:
+        abaikan = {
+            int(idx): (
+                [alasan] if isinstance(alasan, str) else list(alasan)
+            )
+            for idx, alasan in abaikan.items()
+        }
 
     hasil = deteksi_header(data, max_scan=100, max_header_rows=5)
 
@@ -512,8 +535,22 @@ def rekap_grid(data, source_label: str = ""):
     rekap_data = []
     rows_skipped_empty = 0
     rows_skipped_ignored = 0
+    rows_skipped_marked = 0
+    mark_summary = {}
 
-    for row in data[data_start_idx:]:
+    for offset, row in enumerate(data[data_start_idx:]):
+        # Baris ditandai di Excel (hidden/collapse, dicoret, blok gelap)
+        # tidak ikut rekap — ini inti fitur "lewati baris berformat".
+        alasan_tanda = abaikan.get(data_start_idx + offset)
+        if alasan_tanda:
+            rows_skipped_marked += 1
+            # Satu baris dihitung satu alasan (yang pertama) supaya total
+            # alasan selalu = jumlah baris ditandai.
+            mark_summary[alasan_tanda[0]] = (
+                mark_summary.get(alasan_tanda[0], 0) + 1
+            )
+            continue
+
         kode_material = get_cell(row, mapping.get("kode"))
         kode_material_delete = get_cell(row, mapping.get("kode_delete"))
 
@@ -597,6 +634,10 @@ def rekap_grid(data, source_label: str = ""):
         "rows_extracted": len(rekap_data),
         "rows_skipped_empty": rows_skipped_empty,
         "rows_skipped_ignored": rows_skipped_ignored,
+        # Baris ditandai di Excel yang sengaja tidak ikut rekap + alasan
+        # pertamanya (per baris dihitung sekali -> jumlah = rows_skipped_marked).
+        "rows_skipped_marked": rows_skipped_marked,
+        "mark_summary": mark_summary,
     }
 
     return df_rekap, report
