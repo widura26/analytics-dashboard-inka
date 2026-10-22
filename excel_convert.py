@@ -25,6 +25,15 @@ ikut rekap (lihat spec 2026-10-20-lewati-baris-berformat-excel.md). Pandas
 tidak punya akses ke format ini, jadi dibuka sekali lagi dengan openpyxl mode
 normal (mode read-only tidak membawa row_dimensions). File .xls/.xlsb tidak
 mendukung pembacaan format -> 'tandai' kosong (perilaku lama).
+
+SEL MERGED JUGA IKUT DIBACA (kunci rekap dinamis): pandas membaca sel merged
+hanya di sel anchor-nya, sehingga header induk yang membentang lintas kolom
+(mis. '-TS9' pada AX6:BJ6) hilang untuk kolom lain di rentang yang sama.
+Akibatnya sub-kolom 'TINDAK LANJUT' di bawah TS9..TS16 terbaca identik dan
+tidak bisa dibedakan. Rentang merged tiap sheet disertakan pada kunci
+'merged' (tuples 1-based inklusif: baris-awal, kolom-awal, baris-akhir,
+kolom-akhir) dan dipakai bom_rekap.propagate_merged untuk mengisi ulang
+seluruh rentang sebelum deteksi header.
 """
 import io
 from datetime import date, datetime
@@ -85,11 +94,14 @@ def read_excel_sheets(
 
     Mengembalikan daftar dict per sheet:
       {"label": nama sheet, "grid": list[list[str]], "rows": int, "cols": int,
-       "tandai": {baris 0-based: [alasan, ...]}}
+       "tandai": {baris 0-based: [alasan, ...]},
+       "merged": [(r1, c1, r2, c2), ...]}
 
     'tandai' berisi baris yang ditandai di Excel (tersembunyi/collapse,
-    dicoret, blok gelap) — hanya untuk format yang bisa dibaca
-    (.xlsx/.xlsm); file lain -> {} (lihat modul docstring).
+    dicoret, blok gelap); 'merged' berisi rentang sel merged (1-based
+    inklusif) yang dipakai bom_rekap.propagate_merged untuk mengembalikan
+    header induk yang hilang. Keduanya hanya untuk format yang bisa dibaca
+    (.xlsx/.xlsm); file lain -> {} dan [] (lihat modul docstring).
     """
     suffix = Path(filename).suffix.lower()
     engine = ENGINE_BY_SUFFIX.get(suffix)
@@ -109,9 +121,12 @@ def read_excel_sheets(
     except Exception as exc:
         raise ValueError(f"Gagal membuka file Excel: {exc}") from exc
 
-    # Pemindaian format baris terpisah dari pandas (pandas tidak membaca
-    # format sel). Gagal di sini tidak boleh membatalkan pembacaan nilai.
-    tandai = _baca_tandai_baris(raw) if engine == "openpyxl" else {}
+    # Pemindaian format baris & sel merged terpisah dari pandas (pandas
+    # tidak membaca keduanya). Gagal di sini tidak boleh membatalkan
+    # pembacaan nilai.
+    format_sheet = (
+        _baca_format_sheet(raw) if engine == "openpyxl" else {}
+    )
 
     hasil = []
     try:
@@ -121,12 +136,14 @@ def read_excel_sheets(
                 [_cell_to_text(value, date_format) for value in row]
                 for row in sheet_df.itertuples(index=False, name=None)
             ]
+            fmt = format_sheet.get(title) or {}
             hasil.append({
                 "label": title,
                 "grid": grid,
                 "rows": int(len(sheet_df)),
                 "cols": int(len(sheet_df.columns)),
-                "tandai": tandai.get(title, {}),
+                "tandai": fmt.get("tandai", {}),
+                "merged": fmt.get("merged", []),
             })
     except Exception as exc:
         raise ValueError(f"Gagal membaca sheet Excel: {exc}") from exc
@@ -143,14 +160,15 @@ def read_excel_sheets(
 # PEMINDAIAN FORMAT: BARIS YANG DITANDAI ORANG DI EXCEL
 # ============================================================
 
-def _baca_tandai_baris(raw: bytes) -> dict:
-    """Pindai format tiap sheet: baris tersembunyi/collapse, sel dicoret,
-    dan sel berblok gelap/hitam.
+def _baca_format_sheet(raw: bytes) -> dict:
+    """Pindai format tiap sheet: baris ditandai + rentang sel merged.
 
-    Mengembalikan {nama_sheet: {baris 0-based: [alasan, ...]}} — indeks
-    0-based persis seperti posisi baris pada grid hasil _cell_to_text.
-    Gagal membuka workbook (file rusak, format tak terduga) -> {} supaya
-    pembacaan nilai tetap berjalan seperti biasa.
+    Mengembalikan {nama_sheet: {"tandai": {baris 0-based: [alasan, ...]},
+    "merged": [(r1, c1, r2, c2), ...]}} — indeks 0-based persis seperti
+    posisi baris pada grid hasil _cell_to_text; 'merged' memakai koordinat
+    1-based inklusif seperti pada openpyxl, siap dipakai
+    bom_rekap.propagate_merged. Gagal membuka workbook (file rusak, format
+    tak terduga) -> {} supaya pembacaan nilai tetap berjalan seperti biasa.
     """
     try:
         workbook = load_workbook(io.BytesIO(raw), data_only=True)
@@ -161,13 +179,30 @@ def _baca_tandai_baris(raw: bytes) -> dict:
     try:
         for worksheet in workbook.worksheets:
             try:
-                hasil[worksheet.title] = _pindai_tandai_sheet(worksheet)
+                hasil[worksheet.title] = {
+                    "tandai": _pindai_tandai_sheet(worksheet),
+                    "merged": _baca_rentang_merged(worksheet),
+                }
             except Exception:
-                hasil[worksheet.title] = {}
+                hasil[worksheet.title] = {"tandai": {}, "merged": []}
     finally:
         workbook.close()
 
     return hasil
+
+
+def _baca_rentang_merged(worksheet) -> list:
+    """Rentang sel merged satu sheet: [(r1, c1, r2, c2), ...] 1-based.
+
+    Menggantikan peran header induk yang hilang karena pandas hanya
+    membaca nilai pada sel anchor. Fungsi sengaja membatasi diri pada
+    daftar koordinat saja (tanpa nilai) supaya tetap murah untuk sheet
+    berukuran besar.
+    """
+    return [
+        (rng.min_row, rng.min_col, rng.max_row, rng.max_col)
+        for rng in worksheet.merged_cells.ranges
+    ]
 
 
 def _pindai_tandai_sheet(worksheet) -> dict:

@@ -142,13 +142,30 @@ def test_rekap_without_header():
 
 
 def test_rekap_requires_kode():
-    """BOM tanpa Kode Material ditolak (itu kunci merge dengan SAP)."""
+    """Rekap mode dinamis TIDAK menolak sheet tanpa 'Kode Material'.
+
+    Perubahan perilaku sejak mode dinamis (2026-10-21): kolom yang ada
+    di sheet diambil apa adanya, jadi sheet tanpa Kode Material tetap
+    direkap — kolomnya keluar kosong. Kehilangan itu tetap TERLAPORKAN
+    lewat report['kode_terdeteksi'] = False karena 'Kode Material' adalah
+    kunci inner-join dengan data SAP (barisnya tidak akan match).
+    Mode schema mempertahankan penolakan lama.
+    """
     grid = [["Material / Komponen"], ["BAUT M8"]]
+
+    df, report = bom_rekap.rekap_grid(grid, "x.csv")
+    assert report["kode_terdeteksi"] is False, report
+    assert "Kode Material" in df.columns, df.columns.tolist()
+    assert df["Kode Material"].tolist() == [""], df["Kode Material"].tolist()
+    assert df["Material / Komponen"].tolist() == ["BAUT M8"]
+    print("[OK] mode dinamis: sheet tanpa Kode Material tetap direkap "
+          "(kode_terdeteksi=False)")
+
     try:
-        bom_rekap.rekap_grid(grid, "x.csv")
+        bom_rekap.rekap_grid(grid, "x.csv", mode="schema")
     except ValueError as exc:
         assert "Kode Material" in str(exc), exc
-        print("[OK] tanpa Kode Material -> ditolak")
+        print("[OK] mode schema: tanpa Kode Material -> ditolak")
     else:
         raise AssertionError("seharusnya gagal")
 
@@ -170,11 +187,19 @@ def test_rekap_flat_csv():
     raw = to_csv(BOM_HEADER, BOM_ROWS)
     df, report = bom_rekap.rekap_from_bytes(raw, "bom_proyek.csv")
 
-    assert df.columns.tolist() == bom_rekap.KOLOM_REKAP
+    # Mode dinamis: kolom = dua metadata + kolom sheet apa adanya, berurutan
+    # sesuai sheet (bukan urutan KOLOM_CONFIG). Nama kolomnya persis
+    # BOM_HEADER karena header sheet ini sudah seragam.
+    assert report["mode"] == "dinamis", report["mode"]
+    assert df.columns.tolist() == BOM_HEADER, df.columns.tolist()
+    assert report["columns_total"] == len(BOM_HEADER) - 2, report["columns_total"]
+    assert report["kode_terdeteksi"] is True, report
     assert report["header_start_row"] == 1
     assert report["header_row_count"] == 1
     assert report["detected_fields"] == 10, report["detected_fields"]
-    assert report["missing_fields"] == ["BOM"], report["missing_fields"]
+    # Mode dinamis tidak "kehilangan" kolom apa pun — kolom yang tidak ada
+    # di sheet memang tidak ikut, bukan gagal deteksi.
+    assert report["missing_fields"] == [], report["missing_fields"]
     assert report["source_from_column"] is True
     assert report["wbs_from_column"] is True
     assert report["wbs"] == "", "WBS diambil dari kolom, bukan metadata"
@@ -228,7 +253,11 @@ def test_rekap_multirow_header():
     assert report["header_end_row"] == 4, report
     assert report["header_row_count"] == 2, report
     assert report["detected_fields"] == 10, report["detected_fields"]
-    assert report["missing_fields"] == ["BOM"], report["missing_fields"]
+    # Mode dinamis: kolom 'BOM' tidak ada di sheet -> memang tidak ikut
+    # (bukan "gagal deteksi"), sehingga tidak ada daftar field hilang.
+    assert report["missing_fields"] == [], report["missing_fields"]
+    assert report["kode_terdeteksi"] is True, report
+    assert report["columns_total"] == 10, report["columns_total"]
     assert report["wbs"] == "A-1.10", report["wbs"]
     assert report["wbs_from_column"] is False
     assert report["source_from_column"] is False
@@ -244,9 +273,20 @@ def test_rekap_multirow_header():
         df["Stock Total"].tolist()
     assert df["Material / Komponen"].tolist() == ["BAUT M8", "PANEL"]
     assert df["QTY PR TOTAL"].tolist() == [750.0, 0.0]
-    # field tanpa kolom di header -> nilai kosong / nol
-    assert df["BOM"].tolist() == ["", ""]
-    assert len(df.columns) == 13, len(df.columns)
+    # kolom 'BOM' tidak dipaksa ada (mode dinamis mengikuti sheet)
+    assert "BOM" not in df.columns, df.columns.tolist()
+    assert len(df.columns) == 12, len(df.columns)
+
+    # Mode schema tetap mempertahankan skema tetap 13 kolom (termasuk
+    # 'BOM' kosong) untuk kompatibilitas mundur.
+    df_schema, report_schema = bom_rekap.rekap_grid(
+        grid, "bom_ku", mode="schema"
+    )
+    assert df_schema.columns.tolist() == bom_rekap.KOLOM_REKAP
+    assert report_schema["missing_fields"] == ["BOM"], \
+        report_schema["missing_fields"]
+    assert df_schema["BOM"].tolist() == ["", ""]
+    assert len(df_schema.columns) == 13, len(df_schema.columns)
 
     # cleaning di atas hasil rekap multi-row
     clean, stats = clean_bom(df)
@@ -254,6 +294,571 @@ def test_rekap_multirow_header():
     assert clean["Kode Material Delete"].isna().tolist() == [True, False]
     assert clean["Stock Total"].tolist() == [1250.0, 0.0]
     print("[OK] rekap multi-row header (2 baris header, WBS dari Row 2)")
+
+
+def test_propagate_merged():
+    """REGRESI: sel merged hanya terbaca di anchor-nya (pandas), jadi
+    header induk yang membentang lintas kolom hilang.
+
+    Kasus nyata sheet 'Komponen': group '-TS9' di-merge AX6:BJ6 (13
+    kolom). Tanpa propagasi, kolom AZ terbaca 'TINDAK LANJUT' tanpa
+    konteks — dan ada 8 kolom 'TINDAK LANJUT' (di bawah TS9..TS16) yang
+    jadi identik, mustahil dibedakan.
+    """
+    kosong = [""] * 6
+    grid = [
+        ["BILL OF MATERIAL", *kosong[1:]],
+        ["Kode WBS: A-1.10", *kosong[1:]],
+        ["Kode Material", "Material / Komponen", "TS 9", "", "TS 10", ""],
+        ["", "", "TINDAK LANJUT", "UoM", "TINDAK LANJUT", "UoM"],
+        ["1000123", "BAUT M8", "PR BARU", "pcs", "PR EKSISTING", "pcs"],
+    ]
+    # 'C3:D3' & 'E3:F3' = parent group TS membentang ke kolom sub-header
+    merged = [(3, 3, 3, 4), (3, 5, 3, 6)]   # koordinat 1-based inklusif
+
+    # Anchor terisi -> seluruh rentang ikut terisi
+    hasil = bom_rekap.propagate_merged(grid, merged, sampai_baris=3)
+    assert hasil[2][3] == "TS 9", hasil[2]
+    assert hasil[2][5] == "TS 10", hasil[2]
+    # anchor kosong (rentang tidak dipakai) tidak diapa-apakan
+    assert hasil[0][2] == "", hasil[0]
+
+    # grid asli tidak berubah (tidak dimutasi)
+    assert grid[2][3] == "", "grid sumber tidak boleh dimutasi"
+
+    # tanpa merged -> kolom sub-header tetap polos (membuktikan propagasi
+    # yang membuat nama kolom TS9/TS10 bisa dibedakan)
+    _, report_tanpa = bom_rekap.rekap_grid(grid, "bom_ku")
+    assert report_tanpa["header_row_count"] == 2, report_tanpa
+    print("[OK] propagate_merged: parent terisi ke seluruh rentang, "
+          "tanpa memutasi grid asli")
+
+
+def test_rekap_kolom_ts_terpetakan():
+    """Rekap sheet gaya 'Komponen': sub-kolom per TS memakai nama kolom
+    yang menampilkan induknya, sehingga TS9..TS16 tidak tertukar."""
+    kosong = [""] * 6
+    grid = [
+        ["BILL OF MATERIAL", *kosong[1:]],
+        ["Kode WBS: A-1.10", *kosong[1:]],
+        ["Kode Material", "Material / Komponen", "TS 9", "", "TS 10", ""],
+        ["", "", "TINDAK LANJUT", "UoM", "TINDAK LANJUT", "UoM"],
+        ["1000123", "BAUT M8", "PR BARU", "pcs", "PR EKSISTING", "pcs"],
+        ["1000456", "KAWAT", "", "", "PR BARU", "kg"],
+    ]
+    merged = [(3, 3, 3, 4), (3, 5, 3, 6)]
+
+    df, report = bom_rekap.rekap_grid(grid, "Komponen", merged=merged)
+
+    # dua kolom 'TINDAK LANJUT' kini berbeda nama berkat konteks induk
+    assert "TS9 || TINDAK LANJUT" in df.columns, df.columns.tolist()
+    assert "TS10 || TINDAK LANJUT" in df.columns, df.columns.tolist()
+    # label TS diseragamkan: 'TS 9' -> 'TS9' (dan '-TS9' -> 'TS9')
+    assert bom_rekap.rapikan_label_ts("TS 9") == "TS9"
+    assert bom_rekap.rapikan_label_ts("-TS9") == "TS9"
+    assert bom_rekap.rapikan_label_ts("TS 10") == "TS10"
+    assert bom_rekap.rapikan_label_ts("TS 9-16") == "TS9-16"
+    assert bom_rekap.rapikan_label_ts("Spesifikasi") == "Spesifikasi"
+
+    assert df["TS9 || TINDAK LANJUT"].tolist() == ["PR BARU", ""]
+    assert df["TS10 || TINDAK LANJUT"].tolist() == ["PR EKSISTING", "PR BARU"]
+    assert df["TS9 || UoM"].tolist() == ["pcs", ""]
+    # kolom wajib tetap tersedia
+    assert df["Kode Material"].tolist() == ["1000123", "1000456"]
+    assert report["kode_terdeteksi"] is True, report
+    print("[OK] rekap mode dinamis: sub-kolom TS9..TS16 terpetakan "
+          "dengan nama kolom berkonteks induk")
+
+
+def test_propagate_merged_terbatas_blok_header():
+    """REGRESI: propagasi merged HARUS dibatasi baris awal & akhir blok
+    header.
+
+    Kasus nyata sheet 'Komponen': judul 'BILL OF MATERIAL' di-merge
+    G1:U5 — rentangnya MENYENTUH baris 1..5, padahal blok header mulai
+    baris 6. Bila propagasi dimulai dari baris 1, judul itu masuk ke
+    baris 2 yang dibaca ambil_kode_wbs() sehingga 'WBS Elem' berubah
+    dari 'Nama Proyek' menjadi 'BILL OF MATERIAL' (sampah).
+
+    Kasus kedua: merged pada AREA DATA (mis. 'B289:B304' pada sheet
+    Komponen) tidak boleh diisi, atau baris yang semula kosong ikut
+    terisi dan menjadi baris data palsu.
+    """
+    kosong = [""] * 6
+    grid = [
+        ["BILL OF MATERIAL", *kosong[1:]],       # baris 1 (judul, merged 1-3)
+        ["Nama Proyek", *kosong[1:]],            # baris 2 (metadata WBS)
+        ["", *kosong[1:]],                       # baris 3
+        ["Kode Material", "Material / Komponen", "TS 9", "", "TS 10", ""],
+        ["", "", "TINDAK LANJUT", "UoM", "TINDAK LANJUT", "UoM"],
+        ["1000123", "BAUT M8", "PR BARU", "pcs", "PR EKSISTING", "pcs"],
+        ["", "", "", "", "", ""],                # baris data kosong
+        ["", "", "", "", "", ""],
+    ]
+    merged = [
+        (1, 1, 3, 1),      # judul membentang baris 1..3 (DI ATAS header)
+        (3, 3, 3, 4),      # parent 'TS 9'  (baris header)
+        (3, 5, 3, 6),      # parent 'TS 10' (baris header)
+        (7, 1, 8, 1),      # merged pada AREA DATA -> tidak boleh diisi
+    ]
+
+    df, report = bom_rekap.rekap_grid(grid, "Komponen", merged=merged)
+
+    # 1. judul tidak bocor ke baris metadata -> kode WBS tetap bersih
+    assert report["header_start_row"] == 4, report["header_start_row"]
+    # 'BILL OF MATERIAL' di baris 2 tidak ikut terbaca sebagai WBS
+    assert "BILL OF MATERIAL" not in (report["wbs"] or ""), report["wbs"]
+
+    # 2. merged pada area data tidak mengisi baris kosong
+    assert report["rows_extracted"] == 1, report["rows_extracted"]
+
+    # 3. parent TS tetap terisi (blok header dalam jangkauan)
+    assert "TS9 || TINDAK LANJUT" in df.columns, df.columns.tolist()
+    assert "TS10 || TINDAK LANJUT" in df.columns, df.columns.tolist()
+    print("[OK] propagate_merged dibatasi blok header: judul di atas "
+          "header tidak bocor ke metadata; merged area data tidak diisi")
+
+
+def test_excel_merged_end_to_end():
+    """End-to-end: .xlsx ber-merge -> read_excel_sheets -> rekap_grid.
+
+    Membuktikan 'merged' benar-benar dibawa dari pembaca Excel sampai ke
+    rekap, dan nama kolom TS dari dua sheet berbeda diseragamkan sehingga
+    pd.concat menyatukannya (bukan menggandakan kolom).
+    """
+    kosong = [""] * 6
+    komponen = [
+        ["BILL OF MATERIAL", *kosong[1:]],
+        ["Nama Proyek", *kosong[1:]],
+        ["Kode Material", "Material / Komponen", "TS 9", "", "TS 10", ""],
+        ["", "", "TINDAK LANJUT", "UoM", "TINDAK LANJUT", "UoM"],
+        ["1000123", "BAUT M8", "PR BARU", "pcs", "PR EKSISTING", "pcs"],
+    ]
+    # sheet kedua memakai penulisan berbeda ('TS10' tanpa spasi) — harus
+    # menghasilkan nama kolom yang sama setelah rapikan_label_ts
+    painting = [
+        ["BILL OF MATERIAL", *kosong[1:]],
+        ["Nama Proyek", *kosong[1:]],
+        ["Kode Material", "Material / Komponen", "TS9", "", "TS10", ""],
+        ["", "", "TINDAK LANJUT", "UoM", "TINDAK LANJUT", "UoM"],
+        ["1000456", "KAWAT", "PR BARU", "kg", "PR BARU", "kg"],
+    ]
+    raw = xlsx_dengan_sheets_dengan_merged({
+        "Komponen": (komponen, ["C3:D3", "E3:F3"]),
+        "Painting": (painting, ["C3:D3", "E3:F3"]),
+    })
+
+    sheets = read_excel_sheets(raw, "bom.xlsx")
+    assert all(s["merged"] for s in sheets), [
+        s["label"] for s in sheets if not s["merged"]
+    ]
+
+    dfs, reports, dilewati = rekap_sumber_bom(sheets)
+    assert not dilewati, dilewati
+    assert len(dfs) == 2, len(dfs)
+
+    # nama kolom TS seragam lintas sheet -> concat menyatukan, bukan
+    # menggandakan kolom 'TS9 || TINDAK LANJUT'
+    df = pd.concat(dfs, ignore_index=True)
+    assert "TS9 || TINDAK LANJUT" in df.columns, df.columns.tolist()
+    assert "TS10 || TINDAK LANJUT" in df.columns, df.columns.tolist()
+    assert len(dfs[0].columns) == len(dfs[1].columns), (
+        len(dfs[0].columns), len(dfs[1].columns)
+    )
+    assert df["TS9 || TINDAK LANJUT"].tolist() == ["PR BARU", "PR BARU"]
+
+    # baris metadata judul tidak bocor jadi kode WBS
+    # (header 1-based baris 3-4; 'BILL OF MATERIAL' di baris 1 tidak
+    # mengkontaminasi pembacaan WBS di baris 2)
+    assert all(r["header_start_row"] == 3 for r in reports), [
+        r["header_start_row"] for r in reports
+    ]
+    assert all("BILL OF MATERIAL" not in r["wbs"] for r in reports), [
+        r["wbs"] for r in reports
+    ]
+    print("[OK] excel ber-merge -> rekap: kolom TS terpetakan & seragam "
+          "lintas sheet (pd.concat menyatukan)")
+
+
+def test_terapkan_alias():
+    """Peta alias menyeragamkan nama kolom beda-tulis antar sheet.
+
+    Alias = PENYERAGAMAN NAMA, bukan seleksi kolom: ia tidak pernah
+    menghilangkan kolom dari hasil rekap (beda dari KOLOM_CONFIG).
+    """
+    from bom_rekap import ALIAS_KOLOM, ALIAS_POLA, terapkan_alias
+
+    # 1. dict alias: peka-tidak terhadap huruf besar / spasi ganda
+    assert terapkan_alias("SATUAN") == "QUANTITY || UNIT"
+    assert terapkan_alias("satuan") == "QUANTITY || UNIT"
+    assert terapkan_alias("  SATUAN ") == "QUANTITY || UNIT"
+
+    # 2. pola alias: 'DELIV DATE SAP' (Komponen) == 'DELIV DATE' (CPF)
+    #    berlaku untuk semua TS9..TS16 dalam satu aturan
+    for ts in ("TS9", "TS10", "TS16"):
+        assert terapkan_alias(f"{ts} || DELIV DATE SAP") == f"{ts} || DELIV DATE"
+
+    # 3. nama yang TIDAK ada di alias dibiarkan utuh (tidak boleh dipotong)
+    for nama in ("TOTAL || TS9-16", "TOTAL PR", "UOM", "DELIV DATE SAP"):
+        assert terapkan_alias(nama) == nama, nama
+
+    # 4. alias tidak pernah menghapus — hanya mengganti nama
+    assert ALIAS_KOLOM and all(v for v in ALIAS_KOLOM.values())
+    assert ALIAS_POLA
+    print("[OK] terapkan_alias: dict & pola menyeragamkan nama; nama "
+          "lain tidak tersentuh")
+
+
+def test_kolom_dinamis_tandai_alias():
+    """REGRESI: flag `dialias` harus True hanya untuk kolom yang benar-benar
+    diganti ALIAS_KOLOM/ALIAS_POLA, bukan untuk kolom biasa.
+
+    Flag ini dipakai report["columns"] supaya rename bisa diaudit pengguna.
+    """
+    from bom_rekap import kolom_dinamis
+
+    hasil = dict(
+        (idx, (nama, dialias))
+        for idx, nama, dialias in kolom_dinamis([
+            "SATUAN",                  # -> alias
+            "TS13 || DELIV DATE SAP",  # -> alias pola
+            "KODE MATERIAL",           # -> tidak
+            "UOM",                     # -> tidak (sengaja ditolak)
+        ])
+    )
+    assert hasil[0] == ("QUANTITY || UNIT", True), hasil[0]
+    assert hasil[1] == ("TS13 || DELIV DATE", True), hasil[1]
+    assert hasil[2] == ("KODE MATERIAL", False), hasil[2]
+    assert hasil[3] == ("UOM", False), hasil[3]
+
+    # Dua kolom yang memetakan ke nama kanonis yang sama TIDAK boleh saling
+    # menimpa — yang datang kedua diberi sufiks '(2)'. Sufiks mengikuti
+    # URUTAN KOLOM DI SHEET, bukan status alias: dedupe jalan SETELAH alias,
+    # jadi kolom pertama selalu mengklaim nama bersih apa pun asalnya.
+    # (Pada file nyata kolom native 'QUANTITY || UNIT' ada di kolom 18 dan
+    # 'SATUAN' di kolom 34, jadi nama bersih memang jatuh ke kolom native.)
+    hasil2 = dict(
+        (idx, (nama, dialias))
+        for idx, nama, dialias in kolom_dinamis(["SATUAN", "QUANTITY||UNIT"])
+    )
+    assert hasil2[0] == ("QUANTITY || UNIT", True), hasil2[0]
+    assert hasil2[1] == ("QUANTITY || UNIT (2)", False), hasil2[1]
+    # urutan terbalik -> giliran kolom native yang mengklaim nama bersih
+    hasil3 = dict(
+        (idx, (nama, dialias))
+        for idx, nama, dialias in kolom_dinamis(["QUANTITY||UNIT", "SATUAN"])
+    )
+    assert hasil3[0] == ("QUANTITY || UNIT", False), hasil3[0]
+    assert hasil3[1] == ("QUANTITY || UNIT (2)", True), hasil3[1]
+    print("[OK] kolom_dinamis menandai alias; bentrok kanonis diberi "
+          "sufiks '(2)', bukan ditimpa")
+
+
+def test_alias_antar_sheet_menyatukan():
+    """End-to-end: dua sheet dengan penulisan beda -> satu kolom.
+
+    Kasus nyata file LIST DESCOPING KCI: sheet 'Komponen' menulis
+    'DELIV DATE SAP', sheet 'Consumable Painting & Finishing' menulis
+    'DELIV DATE'. Tanpa alias kedua kolom tetap terpisah sehingga rekap
+    gabungan kehilangan tanggal dari salah satu sheet.
+    """
+    # Baris header pertama harus membawa field yang bisa dipetakan
+    # KOLOM_CONFIG ('Kode Material', 'Material / Komponen'), dan baris
+    # anak harus menambah SATU field lagi ('GROUP' -> key 'bom').
+    # Tanpa itu kandidat 1-baris dan 2-baris seri, dan tiebreaker
+    # deteksi_header memilih 1-baris -> seluruh sub-kolom anak hilang.
+    # Struktur ini meniru file aslinya: induk 'TS 13' merged di baris 3,
+    # anak di baris 4, 'GROUP' di baris 4 kolom F.
+    kosong = ["", "", "", ""]
+    komponen = [
+        ["BILL OF MATERIAL", *kosong],
+        ["Nama Proyek", *kosong],
+        ["Kode Material", "Material / Komponen", "TS 13", "", "SATUAN", ""],
+        ["", "", "DELIV DATE SAP", "STATUS", "", "GROUP"],
+        ["1000123", "BAUT M8", "02.11.2026", "OPEN", "pcs", "CAT"],
+    ]
+    painting = [
+        ["BILL OF MATERIAL", *kosong],
+        ["Nama Proyek", *kosong],
+        ["Kode Material", "Material / Komponen", "TS13", "", "UOM", ""],
+        ["", "", "DELIV DATE", "STATUS", "", "GROUP"],
+        ["1000456", "KAWAT", "09.10.2026", "OPEN", "kg", "CAT"],
+    ]
+    raw = xlsx_dengan_sheets_dengan_merged({
+        "Komponen": (komponen, ["C3:D3"]),
+        "Painting": (painting, ["C3:D3"]),
+    })
+    sheets = read_excel_sheets(raw, "bom.xlsx")
+    dfs, reports, dilewati = rekap_sumber_bom(sheets)
+    assert not dilewati, dilewati
+    assert all(
+        r["header_start_row"] == 3 and r["header_row_count"] == 2
+        for r in reports
+    ), [(r["header_start_row"], r["header_row_count"]) for r in reports]
+
+    df = pd.concat(dfs, ignore_index=True)
+    cols = df.columns.tolist()
+
+    # 'DELIV DATE SAP' sudah tidak ada; keduanya menjadi satu kolom
+    assert "TS13 || DELIV DATE" in cols, cols
+    assert not any("DELIV DATE SAP" in c for c in cols), cols
+    assert df["TS13 || DELIV DATE"].dropna().tolist() == [
+        "02.11.2026", "09.10.2026"
+    ]
+    # sub-kolom tetangga 'STATUS' juga menyatu walau satu sheet memakai
+    # penulisan TS berbeda
+    assert "TS13 || STATUS" in cols, cols
+    assert df["TS13 || STATUS"].dropna().tolist() == ["OPEN", "OPEN"]
+
+    # SATUAN diseragamkan menjadi QUANTITY || UNIT (kedua sheet punya
+    # kolom satuan masing-masing)
+    unit = [c for c in cols if c.startswith("QUANTITY || UNIT")]
+    assert unit, cols
+
+    # report mencatat kolom yang di-alias, jejak audit untuk pengguna
+    dilaporkan = {
+        (r["Nama"], r["Alias"]) for r in reports[0]["columns"]
+        if r["Alias"]
+    }
+    assert ("TS13 || DELIV DATE", "ya") in dilaporkan, dilaporkan
+    print("[OK] alias menyatukan kolom lintas sheet: DELIV DATE SAP + "
+          "DELIV DATE -> satu kolom; report menandai kolom yang di-rename")
+
+
+def test_ambil_kode_wbs_blok_metadata_sap():
+    """REGRESI: blok metadata SAP BOM tanpa nilai tidak boleh dianggap WBS.
+
+    Kasus nyata file LIST DESCOPING KCI (2026-10-21): sheet 'Komponen' dan
+    'Consumable Painting & Finishing' memakai template ekspor SAP —
+
+        Nomor Proyek | : |
+        Nama Proyek  | : |
+        Tanggal Terbit | : |
+        Revisi | : |
+        Halaman | : |
+
+    dengan kolom nilai KOSONG (orang yang bikin file tidak mengisinya).
+    Fallback lama `return values[0]` mengembalikan 'Nama Proyek' sebagai
+    'kode WBS'. Dampaknya dua dan keduanya diam-diam:
+      1. 'WBS Elem' terisi 'Nama Proyek' -> merge dengan SAP
+         (left_on Kode Material + WBS Elem) tidak pernah match.
+      2. Peringatan 'Kode WBS tidak ditemukan' di UI HILANG, karena
+         material_planning_2 hanya memperingatkan bila report['wbs'] ==
+         ''. Pengguna tidak tahu kodenya absen.
+    """
+    from bom_rekap import ambil_kode_wbs
+
+    kosong = [""] * 4
+    # gaya Komponen: label tanpa ':' sama sekali
+    komponen = [
+        ["BILL OF MATERIAL", *kosong],
+        ["", "Nomor Proyek", "", ""],
+        ["", "Nama Proyek", "", ""],
+        ["", "Tanggal Terbit", "", ""],
+    ]
+    # gaya CPF: label dengan ':' pemisah tapi nilai tetap kosong
+    cpf = [
+        ["BILL OF MATERIAL", *kosong],
+        ["", "Nomor Proyek", ":", ""],
+        ["", "Nama Proyek", ":", ""],
+        ["", "Tanggal Terbit", ":", ""],
+    ]
+
+    # fallback lama mengembalikan 'Nomor Proyek' (sel pertama baris 2)
+    assert ambil_kode_wbs(komponen) == "", ambil_kode_wbs(komponen)
+    assert ambil_kode_wbs(cpf) == "", ambil_kode_wbs(cpf)
+
+    # tetap terisi bila kolom nilainya memang diisi — pola 'Label : nilai'
+    terisi = [
+        ["BILL OF MATERIAL", *kosong],
+        ["", "Nomor Proyek", ":", "KCI-16TS"],
+        ["", "Nama Proyek", ":", "PENYELESAIAN 16 TS"],
+    ]
+    assert ambil_kode_wbs(terisi) == "KCI-16TS", ambil_kode_wbs(terisi)
+
+    # pola eksplisit 'Kode WBS: A-1.10' tetap menang lebih dulu
+    eksplisit = [["REKAP BOM"], ["Kode WBS: A-1.10", "", "", ""]]
+    assert ambil_kode_wbs(eksplisit) == "A-1.10", ambil_kode_wbs(eksplisit)
+
+    # sel 'WBS' berdiri sendiri, nilainya di sel sesudahnya
+    lepas = [["REKAP BOM"], ["", "", "WBS", "", "B-2.20", ""]]
+    assert ambil_kode_wbs(lepas) == "B-2.20", ambil_kode_wbs(lepas)
+
+    # baris 2 benar-benar kosong -> "" (bukan error)
+    assert ambil_kode_wbs([["JUDUL"], ["", "", "", ""]]) == ""
+    print("[OK] ambil_kode_wbs: label metadata SAP + pemisah ':' tidak "
+          "dijadikan kode; nilai terisi & pola eksplisit tetap terbaca")
+
+
+def test_wbs_kosong_memicu_peringatan():
+    """REGRESI: WBS absen harus menghasilkan report['wbs'] == '' supaya
+    peringatan 'Kode WBS tidak ditemukan' di material_planning_2 muncul.
+
+    Menutup rantai regresi test_ambil_kode_wbs_blok_metadata_sap: bila
+    fallback kembali mengembalikan label, test ini ikut gagal karena
+    report['wbs'] berubah jadi non-kosong dan peringatan hilang.
+    """
+    kosong = [""] * 4
+    grid = [
+        ["BILL OF MATERIAL", *kosong],
+        ["Nomor Proyek", "", "", ""],
+        ["Nama Proyek", "", "", ""],
+        ["Kode Material", "Material / Komponen", "Stock Total", ""],
+        ["1000123", "BAUT M8", "1250", ""],
+    ]
+
+    df, report = bom_rekap.rekap_grid(grid, "Komponen")
+
+    # bukan 'Nama Proyek' / 'Nomor Proyek'
+    assert report["wbs"] == "", repr(report["wbs"])
+    assert report["wbs_from_column"] is False
+    assert "WBS Elem" in df.columns
+    # nilainya kosong di seluruh baris, bukan label metadata
+    assert set(df["WBS Elem"].astype(str).str.strip()) == {""}, \
+        df["WBS Elem"].tolist()
+    # material_planning_2.memperingatkan saat: tidak from_column dan kosong
+    assert not report["wbs_from_column"] and not report["wbs"]
+    print("[OK] WBS absen -> report['wbs'] == '' (peringatan UI menyala, "
+          "bukan label metadata yang menyamar jadi kode)")
+
+
+def test_wbs_manual_diterapkan():
+    """Kode WBS manual (input UI sebelum tombol rekap) mengisi sheet
+    yang kodenya tidak terdeteksi — kasus nyata file LIST DESCOPING KCI
+    yang baris metadata SAP-nya kosong semua.
+
+    Tanpa input ini merge dengan data SAP tidak akan pernah match
+    (left_on Kode Material + WBS Elem) dan filter proyek di dashboard
+    menemukan nol baris — diam-diam.
+    """
+    kosong = [""] * 4
+    grid = [
+        ["BILL OF MATERIAL", *kosong],
+        ["Nomor Proyek", "", "", ""],
+        ["Nama Proyek", "", "", ""],
+        ["Kode Material", "Material / Komponen", "Stock Total", ""],
+        ["1000123", "BAUT M8", "1250", ""],
+        ["1000999", "PNUT M10", "300", ""],
+    ]
+
+    df, report = bom_rekap.rekap_grid(grid, "Komponen", wbs_manual="  KCI-16TS  ")
+
+    # dipakai, dan di-strip (spasi dari input UI tidak ikut ke data)
+    assert report["wbs"] == "KCI-16TS", repr(report["wbs"])
+    assert report["wbs_sumber"] == "manual", report["wbs_sumber"]
+    assert set(df["WBS Elem"].astype(str).str.strip()) == {"KCI-16TS"}, \
+        df["WBS Elem"].tolist()
+    # syarat peringatan 'Kode WBS tidak ditemukan' tidak terpenuhi lagi
+    assert not (not report["wbs_from_column"] and not report["wbs"])
+
+    # tanpa manual: perilaku lama utuh — kosong + peringatan tetap menyala
+    _, report_kosong = bom_rekap.rekap_grid(grid, "Komponen")
+    assert report_kosong["wbs"] == ""
+    assert report_kosong["wbs_sumber"] == ""
+    assert not report_kosong["wbs_from_column"] and not report_kosong["wbs"]
+    print("[OK] WBS manual mengisi sheet tanpa WBS (tersikat, provenance "
+          "'manual', peringatan padam); tanpa manual tetap kosong")
+
+
+def test_wbs_manual_tidak_menimpa_deteksi():
+    """wbs_manual HANYA fallback: kode dari file (metadata / kolom per
+    baris) selalu didahulukan, dan provenance-nya tercatat benar."""
+    # 1) kode terdeteksi di baris metadata -> manual diabaikan
+    deteksi = [
+        ["BILL OF MATERIAL", "", "", ""],
+        ["", "Nomor Proyek", ":", "KCI-16TS"],
+        ["Kode Material", "Material / Komponen", "", ""],
+        ["1000123", "BAUT M8", "", ""],
+    ]
+    df, report = bom_rekap.rekap_grid(deteksi, "Komponen", wbs_manual="X-9.99")
+    assert report["wbs"] == "KCI-16TS", repr(report["wbs"])
+    assert report["wbs_sumber"] == "deteksi", report["wbs_sumber"]
+    assert set(df["WBS Elem"]) == {"KCI-16TS"}
+
+    # 2) kolom 'WBS Elem' per baris -> manual tetap tidak dipakai,
+    #    termasuk untuk baris yang sel-nya kosong (nilai file yang menang)
+    kolom = [
+        ["Kode Material", "Material / Komponen", "WBS Elem"],
+        ["1000123", "BAUT M8", "A-1.10"],
+        ["1000999", "PNUT M10", ""],
+    ]
+    df2, report2 = bom_rekap.rekap_grid(kolom, "Sheet", wbs_manual="X-9.99")
+    assert report2["wbs_from_column"] is True
+    assert report2["wbs"] == ""
+    assert report2["wbs_sumber"] == "kolom", report2["wbs_sumber"]
+    # REGRESI: header di baris 0 -> data[1] adalah baris data, dan
+    # ambil_kode_wbs tanpa guard akan mengembalikan '1000123' (kode
+    # material!) yang lalu disuntikkan ke sel WBS kosong di baris 2.
+    # Guard rekap_grid: blok metadata hanya dibaca bila header indeks >= 2.
+    assert df2["WBS Elem"].tolist() == ["A-1.10", ""], df2["WBS Elem"].tolist()
+    print("[OK] WBS manual tidak menimpa deteksi metadata maupun kolom "
+          "per baris (sumber: deteksi / kolom)")
+
+
+def test_rekap_sumber_bom_wbs_manual():
+    """Jalur UI: run_bom_etl -> rekap_sumber_bom(sources, wbs_manual=...).
+
+    Satu nilai manual dipakai untuk semua sheet yang kekurangan WBS;
+    sheet yang kodenya terdeteksi tidak terpengaruh. (Sejak 2026-10-21
+    satu nilai global — keputusan desain; bila nanti butuh per-sheet,
+    nilainya jadi dict per label sheet.)"""
+    kosong = [""] * 4
+    tanpa_wbs = [
+        ["BILL OF MATERIAL", *kosong],
+        ["Nomor Proyek", "", "", ""],
+        ["Kode Material", "Material / Komponen", ""],
+        ["1000123", "BAUT M8", ""],
+    ]
+    dengan_wbs = [
+        ["BILL OF MATERIAL", *kosong],
+        ["", "Kode WBS: A-1.10", "", ""],
+        ["Kode Material", "Material / Komponen", ""],
+        ["1000999", "PNUT M10", ""],
+    ]
+    sources = [
+        {"label": "Komponen", "grid": tanpa_wbs},
+        {"label": "Consumable", "grid": dengan_wbs},
+    ]
+
+    dfs, reports, dilewati = rekap_sumber_bom(sources, wbs_manual="KCI-16TS")
+
+    assert not dilewati, dilewati
+    assert len(dfs) == 2
+    by_label = {r["source_label"]: r for r in reports}
+    assert by_label["Komponen"]["wbs"] == "KCI-16TS"
+    assert by_label["Komponen"]["wbs_sumber"] == "manual"
+    assert by_label["Consumable"]["wbs"] == "A-1.10"
+    assert by_label["Consumable"]["wbs_sumber"] == "deteksi"
+    assert set(dfs[0]["WBS Elem"]) == {"KCI-16TS"}
+    assert set(dfs[1]["WBS Elem"]) == {"A-1.10"}
+    print("[OK] rekap_sumber_bom: satu WBS manual mengisi sheet yang "
+          "kekurangan kode; sheet berkode tetap memakai kode file")
+
+
+def test_wbs_manual_reset_saat_file_berubah():
+    """Kode WBS manual tidak boleh diam-diam terbawa ke file baru.
+
+    prepare_upload_state me-reset pemilih sheet saat file berubah/hapus;
+    input WBS mengikuti aturan yang sama (kode = milik file/proyek lama).
+    """
+    state = {}
+    prepare_upload_state(state, "bom", FakeUpload("bom.csv", BOM_BYTES))
+    state["etl_bom_wbs_manual"] = "KCI-16TS"
+
+    # file sama -> input tidak disentuh (tidak perlu ketik ulang tiap rerun)
+    prepare_upload_state(state, "bom", FakeUpload("bom.csv", BOM_BYTES))
+    assert state.get("etl_bom_wbs_manual") == "KCI-16TS"
+
+    # file berubah -> kode lama ikut di-reset
+    prepare_upload_state(state, "bom", FakeUpload("bom_v2.csv", BOM_BYTES))
+    assert "etl_bom_wbs_manual" not in state, state.get("etl_bom_wbs_manual")
+
+    # file dihapus -> ikut di-reset
+    state["etl_bom_wbs_manual"] = "KCI-16TS"
+    prepare_upload_state(state, "bom", None)
+    assert "etl_bom_wbs_manual" not in state
+    print("[OK] WBS manual: bertahan saat file sama, di-reset saat file "
+          "berubah/dihapus")
 
 
 def test_bom():
@@ -395,6 +1000,31 @@ def xlsx_dengan_tanda(sheets: dict, tanda: dict) -> bytes:
     buf = io.BytesIO()
     workbook.save(buf)
     return buf.getvalue()
+
+
+def xlsx_dengan_merged(grid, merges: list) -> bytes:
+    """xlsx_sheets + sel merged (rentang gaya openpyxl, mis. 'C3:D3')."""
+    return xlsx_dengan_sheets_dengan_merged({"Sheet1": (grid, merges)})
+
+
+def xlsx_dengan_sheets_dengan_merged(sheets: dict) -> bytes:
+    """{nama_sheet: (grid, [rentang_merged, ...])} -> .xlsx ber-merge."""
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        for title, (grid, _) in sheets.items():
+            pd.DataFrame(grid).to_excel(
+                writer, sheet_name=title, index=False, header=False
+            )
+
+    workbook = load_workbook(io.BytesIO(buf.getvalue()))
+    for title, (_, merges) in sheets.items():
+        worksheet = workbook[title]
+        for rentang in merges:
+            worksheet.merge_cells(rentang)
+
+    out = io.BytesIO()
+    workbook.save(out)
+    return out.getvalue()
 
 
 BOM_GRID = [
@@ -1074,6 +1704,19 @@ if __name__ == "__main__":
     test_clean_bom_missing_columns()
     test_rekap_flat_csv()
     test_rekap_multirow_header()
+    test_propagate_merged()
+    test_rekap_kolom_ts_terpetakan()
+    test_propagate_merged_terbatas_blok_header()
+    test_excel_merged_end_to_end()
+    test_terapkan_alias()
+    test_kolom_dinamis_tandai_alias()
+    test_alias_antar_sheet_menyatukan()
+    test_ambil_kode_wbs_blok_metadata_sap()
+    test_wbs_kosong_memicu_peringatan()
+    test_wbs_manual_diterapkan()
+    test_wbs_manual_tidak_menimpa_deteksi()
+    test_rekap_sumber_bom_wbs_manual()
+    test_wbs_manual_reset_saat_file_berubah()
     bom = test_bom()
     sap = test_sap()
     merge = test_merge(bom, sap)
