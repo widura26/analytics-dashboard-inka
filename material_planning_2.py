@@ -31,10 +31,23 @@ TAB_BOM_CLEAN = "BOM_CLEANED"
 TAB_SAP_CLEAN = "SAP_CLEANED"
 TAB_MERGE = "MERGE_BOM_SAP"
 
+# Kolom yang SANGAT wajib ada di hasil rekap BOM. Hanya dua ini yang
+# tidak bisa ditawar: 'Nama Sheet Sumber' = provenance baris (jadi kunci
+# agregasi), 'Kode Material' = kunci inner-join dengan data SAP.
+#
+# Sejak rekap mode dinamis (2026-10-21) kolom lain DIAMBIL APA ADA dari
+# sheet sumber, sehingga sebuah sheet boleh saja tidak memuat kolom
+# tertentu (sheet 'Komponen' di file LIST DESCOPING KCI tidak punya
+# 'Kode Material Delete' / 'Stock Total' / dst). Kolom di bawah karena
+# itu bersifat OPSIONAL: dijamin diisi kosong oleh clean_bom bila absen,
+# supaya agregasi & merge tetap punya referensi stabil.
 BOM_REQUIRED_COLUMNS = [
     "Nama Sheet Sumber",
-    "WBS Elem",
     "Kode Material",
+]
+
+BOM_OPTIONAL_COLUMNS = [
+    "WBS Elem",
     "Kode Material Delete",
     "Stock Total",
     "Kode Material Stock",
@@ -482,6 +495,38 @@ def _column_hint(df: pd.DataFrame) -> str:
     return f" Kolom yang terbaca ({len(cols)}): {shown}."
 
 
+def _lengkapi_kolom_opsional(df: pd.DataFrame) -> pd.DataFrame:
+    """Jadikan semua kolom BOM opsional ada (diisi nilai aman bila absen).
+
+    Rekap mode dinamis mengambil kolom apa adanya dari sheet sumber, jadi
+    jumlah & nama kolom bisa berbeda antar sheet. Tahap agregasi dan merge
+    di bawah merujuk nama kolom tetap, jadi kolom yang tidak dimiliki
+    sebuah sheet dipenuhi di sini:
+
+      - 'Kode Material Delete'/'Kode Material Stock' -> None, supaya
+        aggregate_bom menyaring lewat .isna() tetap bekerja (baris TANPA
+        kode delete berarti baris yang ikut agregasi);
+      - kolom numerik -> 0.0 (bukan None) supaya 'sum' tidak menghasilkan
+        NaN dan parse_amount_series tidak menemui tipe campuran;
+      - kolom teks -> "" (seragam dengan hasil _norm_text).
+    """
+    out = df
+
+    for col in BOM_OPTIONAL_COLUMNS:
+        if col in out.columns:
+            continue
+        if out is df:
+            out = df.copy()
+        if col in ("Kode Material Delete", "Kode Material Stock"):
+            out[col] = pd.Series([None] * len(out), index=out.index)
+        elif col in BOM_NUMERIC_COLUMNS:
+            out[col] = 0.0
+        else:
+            out[col] = ""
+
+    return out
+
+
 # ============================================================
 # CLEANING
 # ============================================================
@@ -496,6 +541,13 @@ def clean_bom(raw: pd.DataFrame):
             "File BOM tidak memiliki kolom wajib: " + ", ".join(missing) + "."
             + _column_hint(raw)
         )
+
+    # Rekap mode dinamis mengambil kolom APA ADA dari sheet, jadi kolom
+    # opsional bisa tidak ada sama sekali (sheet 'Komponen' di file
+    # LIST DESCOPING KCI, misalnya). Dijamin hadir di sini supaya
+    # normalisasi, agregasi, dan merge di bawah tetap punya referensi
+    # stabil dan tidak perlu meng-cabang-cabang logikanya.
+    df = _lengkapi_kolom_opsional(df)
 
     rows_in = len(df)
     duplicates = int(df.duplicated().sum())
@@ -814,6 +866,10 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
                                     (lihat render_sheet_picker); ikut
                                     di-reset supaya file baru tercentang
                                     semua sheet-anya
+      etl_{prefix}_wbs_manual    -- kode WBS manual (input sebelum tombol
+                                    rekap, lihat render_pipeline); ikut
+                                    di-reset supaya kode file lama tidak
+                                    terbawa ke file baru
     """
     sig_key = f"etl_{prefix}_file_sig"
     sources_key = f"etl_{prefix}_sources"
@@ -821,6 +877,7 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
     conv_key = f"etl_{prefix}_converted"
     err_key = f"etl_{prefix}_convert_error"
     sheets_key = f"etl_{prefix}_sheets"
+    wbs_key = f"etl_{prefix}_wbs_manual"
 
     def clear_all():
         for key in (
@@ -830,6 +887,9 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
             conv_key,
             err_key,
             sheets_key,
+            # Kode WBS manual ikut di-reset: kode milik file/proyek lama
+            # tidak boleh diam-diam terbawa ke file baru yang di-upload.
+            wbs_key,
             f"etl_{prefix}_clean",
             f"etl_{prefix}_stats",
             f"etl_{prefix}_rekap",
@@ -867,6 +927,10 @@ def prepare_upload_state(state, prefix: str, uploaded) -> None:
                     # baris ditandai di Excel (hidden/collapse, dicoret,
                     # blok gelap) -> tidak ikut rekap, lihat rekap_sumber_bom
                     "tandai": sheet.get("tandai") or {},
+                    # rentang sel merged -> header induk yang hilang
+                    # dikembalikan sebelum deteksi header, lihat
+                    # bom_rekap.propagate_merged
+                    "merged": sheet.get("merged") or [],
                 }
                 for sheet in sheets
             ]
@@ -1084,6 +1148,10 @@ def render_rekap_report(reports: list):
     for r in reports:
         if r["wbs_from_column"]:
             wbs = "per baris (kolom)"
+        elif r.get("wbs_sumber") == "manual":
+            # Kode dari input pengguna, bukan dari file — ditandai supaya
+            # provenance terlihat (jangan seolah-olah terdeteksi di sheet).
+            wbs = f"{r['wbs']} (manual)"
         else:
             wbs = r["wbs"] or "TIDAK DITEMUKAN"
         rows.append(
@@ -1118,6 +1186,13 @@ def render_rekap_report(reports: list):
     if no_wbs:
         st.warning(
             "Kode WBS tidak ditemukan pada sheet: " + ", ".join(no_wbs)
+        )
+
+    manual_wbs = [r for r in reports if r.get("wbs_sumber") == "manual"]
+    if manual_wbs:
+        st.info(
+            f"Kode WBS manual '{manual_wbs[0]['wbs']}' diterapkan ke sheet: "
+            + ", ".join(r["source_label"] for r in manual_wbs)
         )
 
     missing = sorted({f for r in reports for f in r["missing_fields"]})
@@ -1159,6 +1234,8 @@ def _render_single_report(report: dict):
         sumber = f"nama sumber ('{report['source_label']}')"
     if report["wbs_from_column"]:
         wbs = "diambil per baris dari kolom CSV"
+    elif report.get("wbs_sumber") == "manual":
+        wbs = f"{report['wbs']} (manual)"
     else:
         wbs = report["wbs"] or "TIDAK DITEMUKAN"
 
@@ -1191,7 +1268,7 @@ def _render_single_report(report: dict):
         )
 
 
-def rekap_sumber_bom(sources: list):
+def rekap_sumber_bom(sources: list, wbs_manual: str = ""):
     """Rekap tiap sumber BOM (algoritma deteksi header fuzzy multi-baris).
 
     SEMUA sumber yang dikirim ikut direkap — tidak ada filter nama sheet
@@ -1215,6 +1292,12 @@ def rekap_sumber_bom(sources: list):
 
     Mengembalikan (dfs, reports, dilewati) — murni, tanpa Streamlit/
     network, supaya mudah diuji.
+
+    wbs_manual = kode WBS buatan pengguna (input sebelum tombol rekap,
+    lihat render_pipeline) — diteruskan ke bom_rekap.rekap_grid dan
+    dipakai HANYA untuk sheet yang kode WBS-nya tidak terdeteksi;
+    kode yang terdeteksi dari file tetap didahulukan (provenance
+    tercatat di report['wbs_sumber']).
     """
     dfs, reports, dilewati = [], [], []
 
@@ -1242,9 +1325,13 @@ def rekap_sumber_bom(sources: list):
                     src["grid"],
                     nama_sumber,
                     abaikan=src.get("tandai"),
+                    merged=src.get("merged"),
+                    wbs_manual=wbs_manual,
                 )
             else:
-                df_src, report = bom_rekap.rekap_from_bytes(src["bytes"], label)
+                df_src, report = bom_rekap.rekap_from_bytes(
+                    src["bytes"], label, wbs_manual=wbs_manual
+                )
         except Exception as exc:
             dilewati.append(f"{label} ({exc})")
             continue
@@ -1263,6 +1350,7 @@ def run_bom_etl(
     sources: list,
     spreadsheet_name: str,
     share_email: str,
+    wbs_manual: str = "",
 ):
     """Rekap + cleaning BOM dari daftar sumber siap-proses.
 
@@ -1297,7 +1385,7 @@ def run_bom_etl(
     # ------------------------------------------------------------
     # TAHAP 1 — REKAP (algoritma deteksi header fuzzy multi-baris)
     # ------------------------------------------------------------
-    dfs, reports, dilewati = rekap_sumber_bom(sources)
+    dfs, reports, dilewati = rekap_sumber_bom(sources, wbs_manual=wbs_manual)
 
     if not reports:
         st.error("Rekap BOM gagal: " + "; ".join(dilewati))
@@ -1507,6 +1595,29 @@ def render_pipeline():
             bom_file_ready = render_upload_status("bom")
             bom_sources = render_sheet_picker("bom")
 
+            # Kode WBS manual: file tanpa kode WBS (mis. LIST DESCOPING KCI
+            # yang baris metadata SAP-nya kosong semua) tetap bisa di-merge
+            # dengan data SAP. Input diletakkan SEBELUM tombol rekap supaya
+            # rekap pertama kali sudah benar — bukan peringatan lalu ulang.
+            # Nilai HANYA dipakai untuk sheet yang kodenya tidak terdeteksi
+            # (kode dari file selalu didahulukan, lihat bom_rekap.rekap_grid).
+            if bom_file_ready:
+                wbs_manual = st.text_input(
+                    "Kode WBS (opsional)",
+                    key="etl_bom_wbs_manual",
+                    help=(
+                        "Dipakai untuk sheet yang tidak memuat kode WBS "
+                        "(kolom 'WBS Elem' maupun baris metadata file). "
+                        "Sheet yang kodenya terdeteksi di file tidak "
+                        "terpengaruh. Kode ini dibutuhkan agar merge dengan "
+                        "data SAP bisa match dan filter proyek di dashboard "
+                        "menemukan barisnya."
+                    ),
+                ).strip()
+            else:
+                st.session_state.pop("etl_bom_wbs_manual", None)
+                wbs_manual = ""
+
             col_bom, col_state = st.columns([1, 2])
 
             with col_bom:
@@ -1544,6 +1655,7 @@ def render_pipeline():
                     bom_sources,
                     spreadsheet_name,
                     share_email,
+                    wbs_manual=wbs_manual,
                 )
 
         # ------------------------------------------------------------
