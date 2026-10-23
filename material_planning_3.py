@@ -117,12 +117,23 @@ def to_long(counts: pd.DataFrame, value_name: str) -> pd.DataFrame:
 # SIDEBAR
 # ============================================================
 
+def reset_sidebar():
+    """Kembalikan URL sumber ke default & buang cache data.
+
+    Dipakai sebagai on_click callback: di callback, widget state boleh
+    dihapus karena belum terinstansiasi pada run berikutnya.
+    """
+    st.session_state.pop("tl_bom_url", None)
+    st.session_state.pop("tl_trainset_manual", None)
+    st.cache_data.clear()
+
+
 def render_sidebar():
     with st.sidebar:
-        st.header("Sumber Data")
+        st.header("Google Sheets")
 
         st.text_input(
-            "URL export CSV Google Sheets",
+            "URL export CSV",
             value=DEFAULT_BOM_URL,
             key="tl_bom_url",
             help=(
@@ -131,13 +142,33 @@ def render_sidebar():
             ),
         )
 
+        st.text_input(
+            "Pilih Trainset (opsional)",
+            key="tl_trainset_manual",
+            placeholder="TS 14",
+            help=(
+                "Isi manual bila ingin langsung membuka trainset tertentu "
+                "tanpa memilih di dropdown. Kosongkan untuk memakai pilihan "
+                "dropdown."
+            ),
+        )
+
         if st.button(
-            "Muat ulang data",
+            "Load Data",
             width="stretch",
             key="btn_reload_tl",
         ):
             st.cache_data.clear()
             st.rerun()
+
+        st.divider()
+
+        st.button(
+            "Reset",
+            width="stretch",
+            key="btn_reset_tl",
+            on_click=reset_sidebar,
+        )
 
 
 # ============================================================
@@ -167,17 +198,20 @@ def render_dashboard():
         return
 
     # ------------------------------------------------------------
-    # Filter
+    # Filter (di luar container utama, seperti dashboard pertama)
     # ------------------------------------------------------------
 
     trainset_options = ("Semua",) + tuple(sorted(data["Trainset"].dropna().unique()))
     col_trainset, col_sheet = st.columns([1, 1])
     with col_trainset:
-        selected_trainset = st.selectbox(
-            "Trainset",
-            trainset_options,
-            index=trainset_options.index("TS 14") if "TS 14" in trainset_options else 0,
-        )
+        default_trainset = st.session_state.get("tl_trainset_manual", "").strip()
+        if default_trainset in trainset_options:
+            index = trainset_options.index(default_trainset)
+        elif "TS 14" in trainset_options:
+            index = trainset_options.index("TS 14")
+        else:
+            index = 0
+        selected_trainset = st.selectbox("Pilih Trainset", trainset_options, index=index)
     if selected_trainset != "Semua":
         data = data[data["Trainset"] == selected_trainset]
 
@@ -190,12 +224,9 @@ def render_dashboard():
     counts = count_by_status(data)
     percentages = percentage_by_status(counts)
 
-    # ------------------------------------------------------------
-    # Metrik ringkas
-    # ------------------------------------------------------------
-
     with st.container(border=True):
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3, border=True)
+
         with col1:
             st.subheader("Total Item")
             st.markdown(f"# {len(data):,}")
@@ -203,101 +234,123 @@ def render_dashboard():
             st.subheader("Material Unik")
             st.markdown(f"# {data['Kode Material'].nunique():,}")
         with col3:
-            st.subheader("Total Kebutuhan")
-            st.markdown(f"# {int(data['Kebutuhan'].sum()):,}")
-        with col4:
-            trainsets = data["Trainset"].nunique()
             st.subheader("Trainset")
-            st.markdown(f"# {trainsets}")
+            st.markdown(f"# {data['Trainset'].nunique()}")
 
-    # ------------------------------------------------------------
-    # Chart sebaran status
-    # ------------------------------------------------------------
+        with st.container(border=True):
+            col1, col2 = st.columns(2, border=True)
 
-    with st.container(border=True):
-        st.subheader("Komposisi Tindak Lanjut per Sheet Asal")
+            with col1:
+                status_totals = counts.sum(axis=1)
+                pie_df = status_totals[status_totals > 0].reset_index()
+                pie_df.columns = ["Tindak Lanjut", "Jumlah"]
+                st.subheader("Tindak Lanjut")
+                if pie_df.empty:
+                    st.info("Belum ada data untuk ditampilkan.")
+                else:
+                    tlchart = px.pie(
+                        pie_df,
+                        values="Jumlah",
+                        names="Tindak Lanjut",
+                        hole=0.3,
+                        color="Tindak Lanjut",
+                        color_discrete_map=STATUS_COLORS,
+                    )
+                    st.plotly_chart(tlchart)
+            with col2:
+                sheet_totals = counts.sum(axis=0)
+                sheet_df = sheet_totals[sheet_totals > 0].reset_index()
+                sheet_df.columns = ["Sheet Asal", "Jumlah"]
+                st.subheader("Sheet Asal")
+                if sheet_df.empty:
+                    st.info("Belum ada data untuk ditampilkan.")
+                else:
+                    shchart = px.pie(
+                        sheet_df,
+                        values="Jumlah",
+                        names="Sheet Asal",
+                        hole=0.3,
+                    )
+                    st.plotly_chart(shchart, width="stretch", height=450)
 
-        status_totals = counts.sum(axis=1)
-        pie_df = status_totals[status_totals > 0].reset_index()
-        pie_df.columns = ["Tindak Lanjut", "Jumlah"]
-
-        col_pie, col_bar = st.columns([1, 2])
-
-        with col_pie:
-            if pie_df.empty:
-                st.info("Belum ada data untuk ditampilkan.")
-            else:
-                pie = px.pie(
-                    pie_df,
-                    values="Jumlah",
-                    names="Tindak Lanjut",
-                    hole=0.3,
-                    color="Tindak Lanjut",
-                    color_discrete_map=STATUS_COLORS,
-                )
-                st.plotly_chart(pie, width="stretch")
-
-        with col_bar:
-            bar = px.bar(
+        ### diagram batang
+        with st.container(border=True):
+            st.subheader("Jumlah Item per Sheet Asal")
+            st.bar_chart(
                 to_long(counts, "Jumlah"),
+                x="Sheet Asal",   # kategori di sumbu (horizontal=True)
+                y="Jumlah",       # nilai angka yang ditumpuk
+                color="Tindak Lanjut",
+                horizontal=True,
+            )
+
+        with st.container(border=True):
+            st.subheader("Persentase Tindak Lanjut (%)")
+            st.caption(
+                "Persentase dihitung terhadap total item per Sheet Asal "
+                "(kolom = 100%)."
+            )
+            pct_bar = px.bar(
+                to_long(percentages, "Persentase (%)"),
                 x="Sheet Asal",
-                y="Jumlah",
+                y="Persentase (%)",
                 color="Tindak Lanjut",
                 color_discrete_map=STATUS_COLORS,
                 barmode="stack",
-                text_auto=True,
+                text_auto=",.2f",
             )
-            st.plotly_chart(bar, width="stretch", height=450)
+            pct_bar.update_yaxes(ticksuffix="%")
+            st.plotly_chart(pct_bar, width="stretch", height=450)
 
-    # ------------------------------------------------------------
-    # Persentase
-    # ------------------------------------------------------------
+        with st.container(border=True):
+            st.subheader("Jumlah Item per Status")
+            st.dataframe(counts)
 
-    with st.container(border=True):
-        st.subheader("Persentase Tindak Lanjut (%)")
-        st.caption(
-            "Persentase dihitung terhadap total item per Sheet Asal "
-            "(kolom = 100%)."
-        )
+        with st.container(border=True):
+            st.subheader("Persentase per Status (%)")
+            st.dataframe(percentages)
 
-        pct_bar = px.bar(
-            to_long(percentages, "Persentase (%)"),
-            x="Sheet Asal",
-            y="Persentase (%)",
-            color="Tindak Lanjut",
-            color_discrete_map=STATUS_COLORS,
-            barmode="stack",
-            text_auto=",.2f",
-        )
-        pct_bar.update_yaxes(ticksuffix="%")
-        st.plotly_chart(pct_bar, width="stretch", height=450)
+        with st.container(border=True):
+            # Filter status lewat toggle (seperti dashboard pertama):
+            # tanpa satu pun toggle aktif -> seluruh data tampil.
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                show_pr_eksisting = st.toggle("PR Eksisting")
+                show_pr_baru = st.toggle("PR Baru")
+            with col_b:
+                show_belum_pr = st.toggle("Belum PR")
+                show_komat = st.toggle("Menunggu Komat")
+            with col_c:
+                show_stok = st.toggle("Menggunakan Stok")
+                show_eval = st.toggle("Menunggu Evaluasi Pemakaian")
 
-    # ------------------------------------------------------------
-    # Tabel jumlah & persentase
-    # ------------------------------------------------------------
+            selected = []
+            if show_pr_eksisting:
+                selected.append(data[data["Tindak Lanjut"] == "PR EKSISTING"])
+            if show_pr_baru:
+                selected.append(data[data["Tindak Lanjut"] == "PR BARU"])
+            if show_belum_pr:
+                selected.append(data[data["Tindak Lanjut"] == "BELUM PR"])
+            if show_komat:
+                selected.append(data[data["Tindak Lanjut"] == "MENUNGGU KOMAT"])
+            if show_stok:
+                selected.append(data[data["Tindak Lanjut"] == "MENGGUNAKAN STOK"])
+            if show_eval:
+                selected.append(data[data["Tindak Lanjut"] == "MENUNGGU EVALUASI PEMAKAIAN"])
 
-    with st.container(border=True):
-        st.subheader("Jumlah Item per Status")
-        st.dataframe(counts, width="stretch")
+            df_terfilter = data.copy()
+            if selected:
+                df_terfilter = pd.concat(selected)
 
-        st.subheader("Persentase per Status (%)")
-        st.dataframe(percentages, width="stretch")
+            st.subheader(f"Dataset Tindak Lanjut ({len(df_terfilter):,})")
+            st.dataframe(df_terfilter)
 
-    # ------------------------------------------------------------
-    # Dataset detail
-    # ------------------------------------------------------------
-
-    with st.container(border=True):
-        st.subheader(f"Dataset Tindak Lanjut ({len(data):,})")
-        st.dataframe(data, width="stretch")
-
-        st.download_button(
-            "Download CSV",
-            data=data.to_csv(index=False).encode("utf-8"),
-            file_name=f"tindak_lanjut_{selected_trainset.lower().replace(' ', '_')}.csv",
-            mime="text/csv",
-            width="stretch",
-        )
+            st.download_button(
+                "Download CSV",
+                data=df_terfilter.to_csv(index=False).encode("utf-8"),
+                file_name=f"tindak_lanjut_{selected_trainset.lower().replace(' ', '_')}.csv",
+                mime="text/csv",
+            )
 
 
 # ============================================================

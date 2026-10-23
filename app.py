@@ -32,7 +32,7 @@ pages = [
     ),
     st.Page(
         page_statistic_dashboard_2,
-        title="Statistic Dashboard 2",
+        title="Statistic Dashboard (New Algorithms)",
         icon=":material/monitoring:",
         url_path="statistic-dashboard-2",
     ),
