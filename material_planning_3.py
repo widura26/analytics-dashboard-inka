@@ -6,6 +6,15 @@ melainkan membaca langsung export CSV dari Google Sheets. Logikanya
 sederhana — filter baris yang sudah punya nilai 'Tindak Lanjut',
 seragamkan label yang mirip, lalu tampilkan sebaran status tindak
 lanjut per 'Sheet Asal' dalam bentuk jumlah item dan persentase.
+
+Dua mode hitung:
+- Trainset spesifik: hitung per baris (satu baris = satu material di
+  satu trainset), sama seperti olahan per-TS.
+- "Semua": material di-collapse dulu LINTAS trainset (kunci
+  NO + Kode Material + Sheet Asal), seluruh nilai Tindak Lanjut-nya
+  disatukan jadi teks koma, lalu diklasifikasi check_pr_status()
+  menjadi 'Status PR' (PR PARSIAL, STOK DAN PR, SUDAH PR, BELUM PR,
+  STOK, STATUS LAIN). Satu material hanya dihitung sekali.
 """
 import io
 
@@ -51,6 +60,26 @@ STATUS_COLORS = {
     "MENUNGGU EVALUASI PEMAKAIAN": "#FF9896",
 }
 
+# Kategori hasil check_pr_status (mode "Semua"). Urutan = urutan tampil
+# di chart/tabel; STATUS LAIN tetap tampil supaya tidak ada data hilang.
+STATUS_PR_ORDER = [
+    "BELUM PR",
+    "PR PARSIAL",
+    "SUDAH PR",
+    "STOK DAN PR",
+    "STOK",
+    "STATUS LAIN / TIDAK DIKENAL",
+]
+
+STATUS_PR_COLORS = {
+    "BELUM PR": "#EF553B",
+    "PR PARSIAL": "#FFA15A",
+    "SUDAH PR": "#00CC96",
+    "STOK DAN PR": "#636EFA",
+    "STOK": "#AB63FA",
+    "STATUS LAIN / TIDAK DIKENAL": "#7F7F7F",
+}
+
 REQUEST_TIMEOUT = 30
 
 # Data Sheets bisa berubah sewaktu-waktu; cache singkat + tombol muat
@@ -82,14 +111,22 @@ def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def count_by_status(df: pd.DataFrame) -> pd.DataFrame:
-    """Jumlah item per 'Tindak Lanjut' x 'Sheet Asal' (reindex urut STATUS_ORDER)."""
+def count_by_status(
+    df: pd.DataFrame,
+    status_col: str = "Tindak Lanjut",
+    order=STATUS_ORDER,
+) -> pd.DataFrame:
+    """Jumlah baris per `status_col` x 'Sheet Asal' (reindex urut `order`).
+
+    `status_col` = 'Tindak Lanjut' (mode trainset spesifik) atau
+    'Status PR' (mode Semua, lihat collapse_material).
+    """
     counts = (
-        df.groupby(["Tindak Lanjut", "Sheet Asal"])
+        df.groupby([status_col, "Sheet Asal"])
         .size()
         .unstack(fill_value=0)
     )
-    return counts.reindex(STATUS_ORDER, fill_value=0)
+    return counts.reindex(order, fill_value=0)
 
 
 def percentage_by_status(counts: pd.DataFrame) -> pd.DataFrame:
@@ -101,16 +138,96 @@ def percentage_by_status(counts: pd.DataFrame) -> pd.DataFrame:
     return counts.div(total_items, axis=1).mul(100).round(2)
 
 
-def to_long(counts: pd.DataFrame, value_name: str) -> pd.DataFrame:
+def to_long(counts: pd.DataFrame, value_name: str, status_col: str = "Tindak Lanjut") -> pd.DataFrame:
     """Pivot lebar (status x sheet) -> panjang, siap dipakai plotly."""
     long = counts.reset_index().melt(
-        id_vars="Tindak Lanjut",
+        id_vars=status_col,
         var_name="Sheet Asal",
         value_name=value_name,
     )
     # Buang baris tanpa sheet (bila ada status yang tidak muncul di
     # sheet tertentu tetap aman karena fill_value=0 di reindex).
     return long[long[value_name].notna()]
+
+
+# ============================================================
+# MODE "SEMUA": COLLAPSE PER MATERIAL + KLASIFIKASI STATUS PR
+# ============================================================
+
+def check_pr_status(text) -> str:
+    """Klasifikasi gabungan Tindak Lanjut satu material lintas trainset.
+
+    `text` = nilai Tindak Lanjut unik yang disatukan jadi teks koma
+    (mis. "PR BARU, MENGGUNAKAN STOK"). Aturan mengikuti olahan asli;
+    cabang STOK ditambahkan supaya material yang hanya memakai stok tidak
+    jatuh ke STATUS LAIN. Kombinasi lain (EVALUASI PEMAKAIAN, PR
+    EKSISTING, campuran lain) -> STATUS LAIN / TIDAK DIKENAL — aturan
+    spesifiknya menyusul, dan kategori ini TETAP tampil di chart/tabel
+    supaya tidak ada data yang hilang diam-diam.
+    """
+    if pd.isna(text):
+        return "BELUM PR"
+
+    arr_status = [status.strip() for status in text.split(",")]
+
+    if "BELUM PR" in arr_status and "PR BARU" in arr_status:
+        return "PR PARSIAL"
+    elif "PR BARU" in arr_status and "MENGGUNAKAN STOK" in arr_status:
+        return "STOK DAN PR"
+    elif "PR BARU" in arr_status:
+        return "SUDAH PR"
+    elif "BELUM PR" in arr_status:
+        return "BELUM PR"
+    elif arr_status == ["MENGGUNAKAN STOK"]:
+        return "STOK"
+
+    return "STATUS LAIN / TIDAK DIKENAL"
+
+
+def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
+    """Satukan seluruh baris per material LINTAS trainset jadi satu baris.
+
+    Kunci: NO + Kode Material + Sheet Asal. NO di-cast ke str dulu
+    (persis olahan asli) supaya baris tanpa NO tidak terbuang oleh
+    groupby default. Semua nilai 'Tindak Lanjut' unik disatukan jadi teks
+    koma (urut kata kedua, deterministic), lalu diklasifikasi menjadi
+    kolom 'Status PR' oleh check_pr_status().
+
+    Kenapa bukan kunci 'Kode Material' saja: 60 kode material punya >1
+    baris NO (784 grup vs 446 kode unik) — memakai NO menjaga baris
+    sheet yang memang terpisah tetap terpisah.
+    """
+    df = data.copy()
+    df["NO"] = df["NO"].astype(str).str.strip()
+
+    grouped = df.groupby(["NO", "Kode Material", "Sheet Asal"], dropna=False)
+
+    joined = grouped["Tindak Lanjut"].apply(
+        lambda s: ", ".join(
+            sorted(
+                s.unique(),
+                key=lambda t: str(t.split()[1]) if len(t.split()) > 1 else str(t),
+            )
+        )
+    ).reset_index()
+
+    desc = grouped["Deskripsi Material"].first().reset_index()
+    joined = pd.merge(joined, desc, on=["NO", "Kode Material", "Sheet Asal"], how="left")
+
+    # Daftar trainset yang menyumbang material ini (urut nomor TS,
+    # mis. "TS 9, TS 10, ..., TS 16") — informatif di tabel detail.
+    joined["Trainset"] = grouped["Trainset"].apply(
+        lambda s: ", ".join(
+            sorted(
+                s.dropna().unique(),
+                key=lambda t: int(t.split()[1]) if t.split()[1].isdigit() else 0,
+            )
+        )
+    ).values
+
+    joined["Status PR"] = joined["Tindak Lanjut"].apply(check_pr_status)
+
+    return joined
 
 
 # ============================================================
@@ -221,18 +338,47 @@ def render_dashboard():
     if selected_sheet != "Semua":
         data = data[data["Sheet Asal"] == selected_sheet]
 
-    counts = count_by_status(data)
+    # ------------------------------------------------------------
+    # Mode hitung:
+    # - "Semua"      -> collapse per material lintas trainset, lalu
+    #                   klasifikasi 'Status PR' (check_pr_status).
+    # - Trainset tertentu -> hitung per baris (satu baris = satu
+    #                   material di satu trainset), status = nilai
+    #                   'Tindak Lanjut' apa adanya.
+    # Layout tampilan sama persis; hanya kolom status & daftarnya yang
+    # berbeda.
+    # ------------------------------------------------------------
+
+    mode_semua = selected_trainset == "Semua"
+
+    if mode_semua:
+        frame = collapse_material(data)
+        status_col = "Status PR"
+        status_order = STATUS_PR_ORDER
+        status_colors = STATUS_PR_COLORS
+        st.caption(
+            f"Mode Semua: {len(frame):,} material digabung dari "
+            f"{len(data):,} baris lintas trainset; Tindak Lanjut berbeda "
+            "antar TS diklasifikasi menjadi satu Status PR."
+        )
+    else:
+        frame = data
+        status_col = "Tindak Lanjut"
+        status_order = STATUS_ORDER
+        status_colors = STATUS_COLORS
+
+    counts = count_by_status(frame, status_col, status_order)
     percentages = percentage_by_status(counts)
 
     with st.container(border=True):
         col1, col2, col3 = st.columns(3, border=True)
 
         with col1:
-            st.subheader("Total Item")
-            st.markdown(f"# {len(data):,}")
+            st.subheader("Material" if mode_semua else "Total Item")
+            st.markdown(f"# {len(frame):,}")
         with col2:
-            st.subheader("Material Unik")
-            st.markdown(f"# {data['Kode Material'].nunique():,}")
+            st.subheader("Kode Unik" if mode_semua else "Material Unik")
+            st.markdown(f"# {frame['Kode Material'].nunique():,}")
         with col3:
             st.subheader("Trainset")
             st.markdown(f"# {data['Trainset'].nunique()}")
@@ -243,18 +389,18 @@ def render_dashboard():
             with col1:
                 status_totals = counts.sum(axis=1)
                 pie_df = status_totals[status_totals > 0].reset_index()
-                pie_df.columns = ["Tindak Lanjut", "Jumlah"]
-                st.subheader("Tindak Lanjut")
+                pie_df.columns = [status_col, "Jumlah"]
+                st.subheader(status_col)
                 if pie_df.empty:
                     st.info("Belum ada data untuk ditampilkan.")
                 else:
                     tlchart = px.pie(
                         pie_df,
                         values="Jumlah",
-                        names="Tindak Lanjut",
+                        names=status_col,
                         hole=0.3,
-                        color="Tindak Lanjut",
-                        color_discrete_map=STATUS_COLORS,
+                        color=status_col,
+                        color_discrete_map=status_colors,
                     )
                     st.plotly_chart(tlchart)
             with col2:
@@ -275,27 +421,28 @@ def render_dashboard():
 
         ### diagram batang
         with st.container(border=True):
-            st.subheader("Jumlah Item per Sheet Asal")
+            st.subheader(f"Jumlah {'Material' if mode_semua else 'Item'} per Sheet Asal")
             st.bar_chart(
-                to_long(counts, "Jumlah"),
+                to_long(counts, "Jumlah", status_col),
                 x="Sheet Asal",   # kategori di sumbu (horizontal=True)
                 y="Jumlah",       # nilai angka yang ditumpuk
-                color="Tindak Lanjut",
+                color=status_col,
                 horizontal=True,
             )
 
         with st.container(border=True):
-            st.subheader("Persentase Tindak Lanjut (%)")
+            st.subheader(f"Persentase {status_col} (%)")
             st.caption(
-                "Persentase dihitung terhadap total item per Sheet Asal "
+                f"Persentase dihitung terhadap total "
+                f"{'material' if mode_semua else 'item'} per Sheet Asal "
                 "(kolom = 100%)."
             )
             pct_bar = px.bar(
-                to_long(percentages, "Persentase (%)"),
+                to_long(percentages, "Persentase (%)", status_col),
                 x="Sheet Asal",
                 y="Persentase (%)",
-                color="Tindak Lanjut",
-                color_discrete_map=STATUS_COLORS,
+                color=status_col,
+                color_discrete_map=status_colors,
                 barmode="stack",
                 text_auto=",.2f",
             )
@@ -303,46 +450,34 @@ def render_dashboard():
             st.plotly_chart(pct_bar, width="stretch", height=450)
 
         with st.container(border=True):
-            st.subheader("Jumlah Item per Status")
+            st.subheader(f"Jumlah per {status_col}")
             st.dataframe(counts)
 
         with st.container(border=True):
-            st.subheader("Persentase per Status (%)")
+            st.subheader(f"Persentase per {status_col} (%)")
             st.dataframe(percentages)
 
         with st.container(border=True):
             # Filter status lewat toggle (seperti dashboard pertama):
             # tanpa satu pun toggle aktif -> seluruh data tampil.
-            col_a, col_b, col_c = st.columns(3)
-            with col_a:
-                show_pr_eksisting = st.toggle("PR Eksisting")
-                show_pr_baru = st.toggle("PR Baru")
-            with col_b:
-                show_belum_pr = st.toggle("Belum PR")
-                show_komat = st.toggle("Menunggu Komat")
-            with col_c:
-                show_stok = st.toggle("Menggunakan Stok")
-                show_eval = st.toggle("Menunggu Evaluasi Pemakaian")
+            # Daftar toggle = status_order, jadi di mode Semua tampil
+            # kategori Status PR (termasuk STATUS LAIN — tidak ada data
+            # yang disembunyikan), di mode trainset tampil Tindak Lanjut.
+            toggle_cols = st.columns(3)
+            selected_labels = []
+            for i, status in enumerate(status_order):
+                with toggle_cols[i % 3]:
+                    if st.toggle(status, key=f"tl_toggle_{status_col}_{status}"):
+                        selected_labels.append(status)
 
-            selected = []
-            if show_pr_eksisting:
-                selected.append(data[data["Tindak Lanjut"] == "PR EKSISTING"])
-            if show_pr_baru:
-                selected.append(data[data["Tindak Lanjut"] == "PR BARU"])
-            if show_belum_pr:
-                selected.append(data[data["Tindak Lanjut"] == "BELUM PR"])
-            if show_komat:
-                selected.append(data[data["Tindak Lanjut"] == "MENUNGGU KOMAT"])
-            if show_stok:
-                selected.append(data[data["Tindak Lanjut"] == "MENGGUNAKAN STOK"])
-            if show_eval:
-                selected.append(data[data["Tindak Lanjut"] == "MENUNGGU EVALUASI PEMAKAIAN"])
+            df_terfilter = frame.copy()
+            if selected_labels:
+                df_terfilter = frame[frame[status_col].isin(selected_labels)]
 
-            df_terfilter = data.copy()
-            if selected:
-                df_terfilter = pd.concat(selected)
-
-            st.subheader(f"Dataset Tindak Lanjut ({len(df_terfilter):,})")
+            st.subheader(
+                f"Dataset {'Material' if mode_semua else 'Tindak Lanjut'} "
+                f"({len(df_terfilter):,})"
+            )
             st.dataframe(df_terfilter)
 
             st.download_button(
