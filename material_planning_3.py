@@ -332,7 +332,7 @@ def render_dashboard():
         data = data[data["Sheet Asal"] == selected_sheet]
 
     # ------------------------------------------------------------
-    # Mode hitung:
+    # Mode hitung:  
     # - "Semua"      -> collapse per material lintas trainset, lalu
     #                   klasifikasi 'Status PR' (check_pr_status).
     # - Trainset tertentu -> hitung per baris (satu baris = satu
@@ -390,20 +390,38 @@ def render_dashboard():
                         color=status_col,
                         color_discrete_map=status_colors,
                     )
+                    tlchart.update_layout(
+                        legend=dict(
+                            orientation="h",
+                            yanchor="top",
+                            y=-0.1,
+                            xanchor="center",
+                            x=0.5
+                        )
+                    )
                     st.plotly_chart(tlchart)
             with col2:
                 sheet_totals = counts.sum(axis=0)
                 sheet_df = sheet_totals[sheet_totals > 0].reset_index()
-                sheet_df.columns = ["Sheet Asal", "Jumlah"]
-                st.subheader("Sheet Asal")
+                sheet_df.columns = ["Group", "Jumlah"]
+                st.subheader("Group")
                 if sheet_df.empty:
                     st.info("Belum ada data untuk ditampilkan.")
                 else:
                     shchart = px.pie(
                         sheet_df,
                         values="Jumlah",
-                        names="Sheet Asal",
+                        names="Group",
                         hole=0.3,
+                    )
+                    shchart.update_layout(
+                        legend=dict(
+                            orientation="h",
+                            yanchor="top",
+                            y=-0.1,
+                            xanchor="center",
+                            x=0.5
+                        )
                     )
                     st.plotly_chart(shchart, width="stretch", height=450)
 
