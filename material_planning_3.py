@@ -155,31 +155,55 @@ def to_long(counts: pd.DataFrame, value_name: str, status_col: str = "Tindak Lan
 # ============================================================
 
 def check_pr_status(text) -> str:
-    """Klasifikasi gabungan Tindak Lanjut satu material lintas trainset.
-
-    `text` = nilai Tindak Lanjut unik yang disatukan jadi teks koma
-    (mis. "PR BARU, MENGGUNAKAN STOK"). Aturan mengikuti olahan asli;
-    cabang STOK ditambahkan supaya material yang hanya memakai stok tidak
-    jatuh ke STATUS LAIN. Kombinasi lain (EVALUASI PEMAKAIAN, PR
-    EKSISTING, campuran lain) -> STATUS LAIN / TIDAK DIKENAL — aturan
-    spesifiknya menyusul, dan kategori ini TETAP tampil di chart/tabel
-    supaya tidak ada data yang hilang diam-diam.
-    """
-    if pd.isna(text):
+    if pd.isna(text) or not str(text).strip():
         return "BELUM PR"
 
-    arr_status = [status.strip() for status in text.split(",")]
+    arr_status = {
+        status.strip().upper()
+        for status in str(text).split(",")
+    }
 
-    if "BELUM PR" in arr_status and "PR BARU" in arr_status:
+    # 1. PR PARSIAL
+    # Jika terdapat PR BARU dan BELUM PR
+    # atau PR BARU bersama MENUNGGU EVALUASI PEMAKAIAN
+    if (
+        "PR BARU" in arr_status
+        and (
+            "BELUM PR" in arr_status
+            or "MENUNGGU EVALUASI PEMAKAIAN" in arr_status
+        )
+    ):
         return "PR PARSIAL"
-    elif "PR BARU" in arr_status and "MENGGUNAKAN STOK" in arr_status:
+
+    # 2. STOK DAN PR
+    # PR BARU atau PR EKSISTING bersama MENGGUNAKAN STOK,
+    # selama tidak memenuhi kondisi PR PARSIAL
+    if (
+        "MENGGUNAKAN STOK" in arr_status
+        and (
+            "PR BARU" in arr_status
+            or "PR EKSISTING" in arr_status
+        )
+    ):
         return "STOK DAN PR"
-    elif "PR BARU" in arr_status:
-        return "SUDAH PR"
-    elif "BELUM PR" in arr_status:
-        return "BELUM PR"
-    elif arr_status == ["MENGGUNAKAN STOK"]:
+
+    # 3. STOK
+    if arr_status == {"MENGGUNAKAN STOK"}:
         return "STOK"
+
+    # 4. SUDAH PR
+    if (
+        "PR BARU" in arr_status
+        or "PR EKSISTING" in arr_status
+    ):
+        return "SUDAH PR"
+
+    # 5. BELUM PR
+    if (
+        "BELUM PR" in arr_status
+        or "MENUNGGU EVALUASI PEMAKAIAN" in arr_status
+    ):
+        return "BELUM PR"
 
     return "STATUS LAIN / TIDAK DIKENAL"
 
