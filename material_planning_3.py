@@ -259,40 +259,15 @@ def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
 # ============================================================
 
 def reset_sidebar():
-    """Kembalikan URL sumber ke default & buang cache data.
+    """Bersihkan cache data sumber.
 
-    Dipakai sebagai on_click callback: di callback, widget state boleh
-    dihapus karena belum terinstansiasi pada run berikutnya.
+    Dipakai sebagai on_click callback.
     """
-    st.session_state.pop("tl_bom_url", None)
-    st.session_state.pop("tl_trainset_manual", None)
     st.cache_data.clear()
 
 
 def render_sidebar():
     with st.sidebar:
-        st.header("Google Sheets")
-
-        st.text_input(
-            "URL export CSV",
-            value=DEFAULT_BOM_URL,
-            key="tl_bom_url",
-            help=(
-                "Export CSV publik (File > Share > Publish, atau tambahkan "
-                "'/export?format=csv&gid=...' di akhir URL spreadsheet)."
-            ),
-        )
-
-        st.text_input(
-            "Pilih Trainset (opsional)",
-            key="tl_trainset_manual",
-            placeholder="TS 14",
-            help=(
-                "Isi manual bila ingin langsung membuka trainset tertentu "
-                "tanpa memilih di dropdown. Kosongkan untuk memakai pilihan "
-                "dropdown."
-            ),
-        )
 
         if st.button(
             "Load Data",
@@ -317,15 +292,12 @@ def render_sidebar():
 # ============================================================
 
 def render_dashboard():
-    url = st.session_state.tl_bom_url.strip()
-
     try:
-        raw = load_bom_data(url)
+        raw = load_bom_data(DEFAULT_BOM_URL)
     except Exception as exc:
         st.error(
             f"Gagal membaca data dari Google Sheets: {exc}. "
-            "Periksa URL export CSV di sidebar — pastikan spreadsheet "
-            "dishare publik."
+            "Periksa koneksi & pastikan spreadsheet dishare publik."
         )
         return
 
@@ -345,10 +317,7 @@ def render_dashboard():
     trainset_options = ("Semua",) + tuple(sorted(data["Trainset"].dropna().unique()))
     col_trainset, col_sheet = st.columns([1, 1])
     with col_trainset:
-        default_trainset = st.session_state.get("tl_trainset_manual", "").strip()
-        if default_trainset in trainset_options:
-            index = trainset_options.index(default_trainset)
-        elif "TS 14" in trainset_options:
+        if "TS 14" in trainset_options:
             index = trainset_options.index("TS 14")
         else:
             index = 0
@@ -380,11 +349,6 @@ def render_dashboard():
         status_col = "Status PR"
         status_order = STATUS_PR_ORDER
         status_colors = STATUS_PR_COLORS
-        st.caption(
-            f"Mode Semua: {len(frame):,} material digabung dari "
-            f"{len(data):,} baris lintas trainset; Tindak Lanjut berbeda "
-            "antar TS diklasifikasi menjadi satu Status PR."
-        )
     else:
         frame = data
         status_col = "Tindak Lanjut"
@@ -517,7 +481,7 @@ def render_dashboard():
 # ============================================================
 
 def render():
-    st.title("Statistik Dashboard 2")
+    st.title("Statistics Dashboard")
 
     render_sidebar()
     render_dashboard()
