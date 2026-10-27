@@ -255,6 +255,52 @@ def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
+# AGREGASI CHART TAMBAHAN (TREN DELIV DATE & QTY PER SHEET)
+# ============================================================
+
+def build_delivery_trend(df: pd.DataFrame) -> pd.DataFrame:
+    """Jumlah item per bulan kolom 'Deliv Date SAP' (format dd.mm.yyyy).
+
+    Bulan tanpa pengiriman di tengah rentang direindex jadi 0, supaya
+    celah timeline terlihat apa adanya (mis. tidak ada pengiriman antara
+    2024-10 dan 2025-03). Baris tanpa tanggal / tanggal tidak valid
+    tidak dihitung — pemanggil bisa membandingkan sum(Jumlah) dengan
+    len(df) untuk tahu sisanya.
+
+    Mengembalikan frame ['Bulan' (string 'YYYY-MM', urut), 'Jumlah'].
+    Kosong bila kolomnya tidak ada atau tidak ada satu pun tanggal valid.
+    """
+    if "Deliv Date SAP" not in df.columns:
+        return pd.DataFrame(columns=["Bulan", "Jumlah"])
+
+    dates = pd.to_datetime(df["Deliv Date SAP"], format="%d.%m.%Y", errors="coerce")
+    per_bulan = dates.dropna().dt.to_period("M")
+    if per_bulan.empty:
+        return pd.DataFrame(columns=["Bulan", "Jumlah"])
+
+    rentang = pd.period_range(per_bulan.min(), per_bulan.max(), freq="M")
+    jumlah = per_bulan.value_counts().reindex(rentang, fill_value=0).sort_index()
+
+    out = jumlah.rename_axis("Bulan").reset_index(name="Jumlah")
+    out["Bulan"] = out["Bulan"].astype(str)
+    return out
+
+
+def qty_by_sheet(df: pd.DataFrame) -> pd.DataFrame:
+    """Total 'Kebutuhan' per Sheet Asal, urut menurun.
+
+    Data apa adanya: sheet yang kolom Kebutuhannya diisi 0 di sumber
+    (mis. 'Komponen') tetap muncul dengan nilai 0 — justru itulah
+    perbandingannya. Mengembalikan frame kosong bila kolomnya absen.
+    """
+    if "Kebutuhan" not in df.columns:
+        return pd.DataFrame(columns=["Sheet Asal", "Kebutuhan"])
+
+    out = df.groupby("Sheet Asal", as_index=False)["Kebutuhan"].sum()
+    return out.sort_values("Kebutuhan", ascending=False).reset_index(drop=True)
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 
@@ -362,10 +408,10 @@ def render_dashboard():
         col1, col2, col3 = st.columns(3, border=True)
 
         with col1:
-            st.subheader("Material" if mode_semua else "Total Item")
+            st.subheader("Total Item")
             st.markdown(f"# {len(frame):,}")
         with col2:
-            st.subheader("Kode Unik" if mode_semua else "Material Unik")
+            st.subheader("Jumlah Material")
             st.markdown(f"# {frame['Kode Material'].nunique():,}")
         with col3:
             st.subheader("Trainset")
@@ -375,32 +421,6 @@ def render_dashboard():
             col1, col2 = st.columns(2, border=True)
 
             with col1:
-                status_totals = counts.sum(axis=1)
-                pie_df = status_totals[status_totals > 0].reset_index()
-                pie_df.columns = [status_col, "Jumlah"]
-                st.subheader(status_col)
-                if pie_df.empty:
-                    st.info("Belum ada data untuk ditampilkan.")
-                else:
-                    tlchart = px.pie(
-                        pie_df,
-                        values="Jumlah",
-                        names=status_col,
-                        hole=0.3,
-                        color=status_col,
-                        color_discrete_map=status_colors,
-                    )
-                    tlchart.update_layout(
-                        legend=dict(
-                            orientation="h",
-                            yanchor="top",
-                            y=-0.1,
-                            xanchor="center",
-                            x=0.5
-                        )
-                    )
-                    st.plotly_chart(tlchart)
-            with col2:
                 sheet_totals = counts.sum(axis=0)
                 sheet_df = sheet_totals[sheet_totals > 0].reset_index()
                 sheet_df.columns = ["Group", "Jumlah"]
@@ -424,6 +444,33 @@ def render_dashboard():
                         )
                     )
                     st.plotly_chart(shchart, width="stretch", height=450)
+            with col2:
+                status_totals = counts.sum(axis=1)
+                pie_df = status_totals[status_totals > 0].reset_index()
+                pie_df.columns = [status_col, "Jumlah"]
+                st.subheader("Status PR")
+                if pie_df.empty:
+                    st.info("Belum ada data untuk ditampilkan.")
+                else:
+                    tlchart = px.pie(
+                        pie_df,
+                        values="Jumlah",
+                        names=status_col,
+                        hole=0.3,
+                        color=status_col,
+                        color_discrete_map=status_colors,
+                    )
+                    tlchart.update_layout(
+                        legend=dict(
+                            orientation="h",
+                            yanchor="top",
+                            y=-0.1,
+                            xanchor="center",
+                            x=0.5
+                        )
+                    )
+                    st.plotly_chart(tlchart)
+            
 
         ### diagram batang
         with st.container(border=True):
@@ -454,6 +501,70 @@ def render_dashboard():
             )
             pct_bar.update_yaxes(ticksuffix="%")
             st.plotly_chart(pct_bar, width="stretch", height=450)
+
+        # ------------------------------------------------------------
+        # Tren Deliv Date SAP per bulan (dihitung dari baris, bukan
+        # hasil collapse — tanggal beda antar trainset)
+        # ------------------------------------------------------------
+        with st.container(border=True):
+            st.subheader("Tren Deliv Date SAP per Bulan")
+            trend = build_delivery_trend(data)
+            if trend.empty:
+                st.info(
+                    "Tidak ada 'Deliv Date SAP' yang valid pada data "
+                    "terpilih."
+                )
+            else:
+                terjadwal = int(trend["Jumlah"].sum())
+                tanpa_tanggal = len(data) - terjadwal
+                st.caption(
+                    f"{terjadwal:,} dari {len(data):,} baris punya Deliv "
+                    f"Date SAP valid. Tanpa tanggal: {tanpa_tanggal:,} "
+                    "baris (tidak dihitung di tren ini). Bulan kosong "
+                    "ditampilkan 0."
+                )
+                trend_chart = px.line(
+                    trend,
+                    x="Bulan",
+                    y="Jumlah",
+                    markers=True,
+                    text="Jumlah",
+                )
+                trend_chart.update_traces(textposition="top center")
+                trend_chart.update_layout(
+                    xaxis_title="Bulan",
+                    yaxis_title="Jumlah Item",
+                    showlegend=False,
+                )
+                st.plotly_chart(trend_chart, width="stretch", height=450)
+
+        # ------------------------------------------------------------
+        # Perbandingan total kebutuhan (qty) antar Sheet Asal
+        # ------------------------------------------------------------
+        with st.container(border=True):
+            st.subheader("Perbandingan Kebutuhan (Qty) per Sheet Asal")
+            qty = qty_by_sheet(data)
+            if qty.empty:
+                st.info("Kolom 'Kebutuhan' tidak ditemukan pada data terpilih.")
+            else:
+                total_qty = int(qty["Kebutuhan"].sum())
+                st.caption(
+                    f"Total {total_qty:,} qty. Nilai 0 = kolom Kebutuhan "
+                    "memang diisi 0 di sheet sumber (bukan data hilang)."
+                )
+                qty_chart = px.bar(
+                    qty,
+                    x="Sheet Asal",
+                    y="Kebutuhan",
+                    color="Sheet Asal",
+                    text_auto=":,.0f",
+                )
+                qty_chart.update_layout(
+                    xaxis_title="Sheet Asal",
+                    yaxis_title="Qty",
+                    showlegend=False,
+                )
+                st.plotly_chart(qty_chart, width="stretch", height=450)
 
         with st.container(border=True):
             st.subheader(f"Jumlah per {status_col}")
