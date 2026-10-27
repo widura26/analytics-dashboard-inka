@@ -130,24 +130,12 @@ def count_by_status(
 
 
 def percentage_by_status(counts: pd.DataFrame) -> pd.DataFrame:
-    """Persentase per status terhadap total tiap 'Sheet Asal' (kolom)."""
     if counts.empty or counts.columns.empty:
         return counts.astype(float)
 
     total_items = counts.sum(axis=0)
     return counts.div(total_items, axis=1).mul(100).round(2)
 
-
-def to_long(counts: pd.DataFrame, value_name: str, status_col: str = "Tindak Lanjut") -> pd.DataFrame:
-    """Pivot lebar (status x sheet) -> panjang, siap dipakai plotly."""
-    long = counts.reset_index().melt(
-        id_vars=status_col,
-        var_name="Sheet Asal",
-        value_name=value_name,
-    )
-    # Buang baris tanpa sheet (bila ada status yang tidak muncul di
-    # sheet tertentu tetap aman karena fill_value=0 di reindex).
-    return long[long[value_name].notna()]
 
 
 # ============================================================
@@ -255,7 +243,7 @@ def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
 
 
 # ============================================================
-# AGREGASI CHART TAMBAHAN (TREN DELIV DATE & QTY PER SHEET)
+# AGREGASI CHART TAMBAHAN (TREN DELIV DATE)
 # ============================================================
 
 def build_delivery_trend(df: pd.DataFrame) -> pd.DataFrame:
@@ -286,18 +274,44 @@ def build_delivery_trend(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def qty_by_sheet(df: pd.DataFrame) -> pd.DataFrame:
-    """Total 'Kebutuhan' per Sheet Asal, urut menurun.
+def status_by_trainset(
+    df: pd.DataFrame,
+    order=STATUS_ORDER,
+    all_trainsets=None,
+) -> pd.DataFrame:
+    """Persentase komposisi 'Tindak Lanjut' per Trainset (stack 100%).
 
-    Data apa adanya: sheet yang kolom Kebutuhannya diisi 0 di sumber
-    (mis. 'Komponen') tetap muncul dengan nilai 0 — justru itulah
-    perbandingannya. Mengembalikan frame kosong bila kolomnya absen.
+    Dihitung dari baris apa adanya, BUKAN dari 'Status PR' hasil
+    collapse — semua material punya baris di setiap trainset, jadi
+    Status PR akan menghasilkan batang identik di semua trainset.
+    Nilai = (jumlah baris per status / total baris trainset) x 100.
+
+    all_trainsets: daftar lengkap trainset yang harus tampil di sumbu-X.
+    Trainset tanpa baris di df (mis. difilter keluar) tetap muncul
+    dengan nilai 0, jadi chart tidak menyusut saat filter menyempit.
+
+    Urutan baris = numerik (TS 9, TS 10, ..., TS 16); status yang tidak
+    muncul di data dibuang dari kolom (legend tidak menampilkan kategori
+    kosong). Mengembalikan frame kosong bila datanya kosong.
     """
-    if "Kebutuhan" not in df.columns:
-        return pd.DataFrame(columns=["Sheet Asal", "Kebutuhan"])
+    if df.empty or "Trainset" not in df.columns:
+        return pd.DataFrame()
 
-    out = df.groupby("Sheet Asal", as_index=False)["Kebutuhan"].sum()
-    return out.sort_values("Kebutuhan", ascending=False).reset_index(drop=True)
+    def _ts_key(t):
+        parts = str(t).split()
+        return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+
+    if all_trainsets is None:
+        all_trainsets = df["Trainset"].dropna().unique()
+    ts_order = sorted(all_trainsets, key=_ts_key)
+
+    ctab = pd.crosstab(df["Trainset"], df["Tindak Lanjut"])
+    ctab = ctab.reindex(index=ts_order, fill_value=0)
+    ctab = ctab[[s for s in order if s in ctab.columns]]
+
+    total = ctab.sum(axis=1).astype(float)
+    total = total.where(total > 0)  # 0 -> NaN, dibuang di fillna
+    return ctab.div(total, axis=0).fillna(0) * 100
 
 
 # ============================================================
@@ -472,35 +486,63 @@ def render_dashboard():
                     st.plotly_chart(tlchart)
             
 
-        ### diagram batang
+        # ------------------------------------------------------------
+        # Komposisi tindak lanjut per trainset. Semua trainset selalu
+        # tampil di sumbu-X; di mode trainset spesifik hanya trainset
+        # terpilih yang terisi, sisanya 0. Pakai Tindak Lanjut per
+        # baris; Status PR hasil collapse tidak bisa dipakai di sini
+        # karena semua material ada di 8 trainset sehingga batangnya
+        # akan identik.
+        # ------------------------------------------------------------
         with st.container(border=True):
-            st.subheader(f"Jumlah {'Material' if mode_semua else 'Item'} per Sheet Asal")
-            st.bar_chart(
-                to_long(counts, "Jumlah", status_col),
-                x="Sheet Asal",   # kategori di sumbu (horizontal=True)
-                y="Jumlah",       # nilai angka yang ditumpuk
-                color=status_col,
-                horizontal=True,
-            )
-
-        with st.container(border=True):
-            st.subheader(f"Persentase {status_col} (%)")
-            st.caption(
-                f"Persentase dihitung terhadap total "
-                f"{'material' if mode_semua else 'item'} per Sheet Asal "
-                "(kolom = 100%)."
-            )
-            pct_bar = px.bar(
-                to_long(percentages, "Persentase (%)", status_col),
-                x="Sheet Asal",
-                y="Persentase (%)",
-                color=status_col,
-                color_discrete_map=status_colors,
-                barmode="stack",
-                text_auto=",.2f",
-            )
-            pct_bar.update_yaxes(ticksuffix="%")
-            st.plotly_chart(pct_bar, width="stretch", height=450)
+            st.subheader("Komposisi Tindak Lanjut per Trainset")
+            semua_trainset = list(trainset_options[1:])  # tanpa "Semua"
+            per_ts = status_by_trainset(data, all_trainsets=semua_trainset)
+            if per_ts.empty:
+                st.info("Belum ada baris untuk ditampilkan.")
+            else:
+                if mode_semua:
+                    st.caption(
+                        "Persentase dari jumlah baris tiap trainset "
+                        "(Tindak Lanjut per baris, bukan Status PR hasil "
+                        "gabungan lintas trainset)."
+                    )
+                else:
+                    st.caption(
+                        f"Persentase dari jumlah baris {selected_trainset}; "
+                        "trainset lain tampil 0 karena datanya sudah "
+                        "difilter."
+                    )
+                ts_long = per_ts.reset_index().melt(
+                    id_vars="Trainset",
+                    var_name="Tindak Lanjut",
+                    value_name="Persentase (%)",
+                )
+                ts_chart = px.bar(
+                    ts_long,
+                    x="Trainset",
+                    y="Persentase (%)",
+                    color="Tindak Lanjut",
+                    barmode="stack",
+                    color_discrete_map=STATUS_COLORS,
+                    category_orders={
+                        "Trainset": list(per_ts.index),
+                        "Tindak Lanjut": list(per_ts.columns),
+                    },
+                )
+                ts_chart.update_yaxes(ticksuffix="%", range=[0, 100])
+                ts_chart.update_layout(
+                    xaxis_title="Trainset",
+                    yaxis_title="Persentase (%)",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="top",
+                        y=-0.15,
+                        xanchor="center",
+                        x=0.5,
+                    ),
+                )
+                st.plotly_chart(ts_chart, width="stretch", height=450)
 
         # ------------------------------------------------------------
         # Tren Deliv Date SAP per bulan (dihitung dari baris, bukan
@@ -516,13 +558,7 @@ def render_dashboard():
                 )
             else:
                 terjadwal = int(trend["Jumlah"].sum())
-                tanpa_tanggal = len(data) - terjadwal
-                st.caption(
-                    f"{terjadwal:,} dari {len(data):,} baris punya Deliv "
-                    f"Date SAP valid. Tanpa tanggal: {tanpa_tanggal:,} "
-                    "baris (tidak dihitung di tren ini). Bulan kosong "
-                    "ditampilkan 0."
-                )
+                # tanpa_tanggal = len(data) - terjadwal
                 trend_chart = px.line(
                     trend,
                     x="Bulan",
@@ -537,34 +573,6 @@ def render_dashboard():
                     showlegend=False,
                 )
                 st.plotly_chart(trend_chart, width="stretch", height=450)
-
-        # ------------------------------------------------------------
-        # Perbandingan total kebutuhan (qty) antar Sheet Asal
-        # ------------------------------------------------------------
-        with st.container(border=True):
-            st.subheader("Perbandingan Kebutuhan (Qty) per Sheet Asal")
-            qty = qty_by_sheet(data)
-            if qty.empty:
-                st.info("Kolom 'Kebutuhan' tidak ditemukan pada data terpilih.")
-            else:
-                total_qty = int(qty["Kebutuhan"].sum())
-                st.caption(
-                    f"Total {total_qty:,} qty. Nilai 0 = kolom Kebutuhan "
-                    "memang diisi 0 di sheet sumber (bukan data hilang)."
-                )
-                qty_chart = px.bar(
-                    qty,
-                    x="Sheet Asal",
-                    y="Kebutuhan",
-                    color="Sheet Asal",
-                    text_auto=":,.0f",
-                )
-                qty_chart.update_layout(
-                    xaxis_title="Sheet Asal",
-                    yaxis_title="Qty",
-                    showlegend=False,
-                )
-                st.plotly_chart(qty_chart, width="stretch", height=450)
 
         with st.container(border=True):
             st.subheader(f"Jumlah per {status_col}")
@@ -592,7 +600,7 @@ def render_dashboard():
                 df_terfilter = frame[frame[status_col].isin(selected_labels)]
 
             st.subheader(
-                f"Dataset {'Material' if mode_semua else 'Tindak Lanjut'} "
+                f"Dataset Bill Of Materials"
                 f"({len(df_terfilter):,})"
             )
             st.dataframe(df_terfilter)
