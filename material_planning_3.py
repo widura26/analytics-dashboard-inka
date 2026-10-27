@@ -274,13 +274,21 @@ def build_delivery_trend(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def status_by_trainset(df: pd.DataFrame, order=STATUS_ORDER) -> pd.DataFrame:
+def status_by_trainset(
+    df: pd.DataFrame,
+    order=STATUS_ORDER,
+    all_trainsets=None,
+) -> pd.DataFrame:
     """Persentase komposisi 'Tindak Lanjut' per Trainset (stack 100%).
 
     Dihitung dari baris apa adanya, BUKAN dari 'Status PR' hasil
     collapse — semua material punya baris di setiap trainset, jadi
     Status PR akan menghasilkan batang identik di semua trainset.
     Nilai = (jumlah baris per status / total baris trainset) x 100.
+
+    all_trainsets: daftar lengkap trainset yang harus tampil di sumbu-X.
+    Trainset tanpa baris di df (mis. difilter keluar) tetap muncul
+    dengan nilai 0, jadi chart tidak menyusut saat filter menyempit.
 
     Urutan baris = numerik (TS 9, TS 10, ..., TS 16); status yang tidak
     muncul di data dibuang dari kolom (legend tidak menampilkan kategori
@@ -293,7 +301,10 @@ def status_by_trainset(df: pd.DataFrame, order=STATUS_ORDER) -> pd.DataFrame:
         parts = str(t).split()
         return int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
 
-    ts_order = sorted(df["Trainset"].dropna().unique(), key=_ts_key)
+    if all_trainsets is None:
+        all_trainsets = df["Trainset"].dropna().unique()
+    ts_order = sorted(all_trainsets, key=_ts_key)
+
     ctab = pd.crosstab(df["Trainset"], df["Tindak Lanjut"])
     ctab = ctab.reindex(index=ts_order, fill_value=0)
     ctab = ctab[[s for s in order if s in ctab.columns]]
@@ -476,25 +487,32 @@ def render_dashboard():
             
 
         # ------------------------------------------------------------
-        # Komposisi tindak lanjut per trainset — HANYA mode Semua.
-        # Pakai Tindak Lanjut per baris; Status PR hasil collapse tidak
-        # bisa dipakai di sini karena semua material ada di 8 trainset
-        # sehingga batangnya akan identik.
+        # Komposisi tindak lanjut per trainset. Semua trainset selalu
+        # tampil di sumbu-X; di mode trainset spesifik hanya trainset
+        # terpilih yang terisi, sisanya 0. Pakai Tindak Lanjut per
+        # baris; Status PR hasil collapse tidak bisa dipakai di sini
+        # karena semua material ada di 8 trainset sehingga batangnya
+        # akan identik.
         # ------------------------------------------------------------
         with st.container(border=True):
             st.subheader("Komposisi Tindak Lanjut per Trainset")
-            per_ts = status_by_trainset(data) if mode_semua else pd.DataFrame()
+            semua_trainset = list(trainset_options[1:])  # tanpa "Semua"
+            per_ts = status_by_trainset(data, all_trainsets=semua_trainset)
             if per_ts.empty:
-                st.info(
-                    'Chart ini membandingkan antar trainset, jadi hanya '
-                    'tampil saat Trainset = "Semua".'
-                )
+                st.info("Belum ada baris untuk ditampilkan.")
             else:
-                st.caption(
-                    "Persentase dari jumlah baris tiap trainset "
-                    "(Tindak Lanjut per baris, bukan Status PR hasil "
-                    "gabungan lintas trainset)."
-                )
+                if mode_semua:
+                    st.caption(
+                        "Persentase dari jumlah baris tiap trainset "
+                        "(Tindak Lanjut per baris, bukan Status PR hasil "
+                        "gabungan lintas trainset)."
+                    )
+                else:
+                    st.caption(
+                        f"Persentase dari jumlah baris {selected_trainset}; "
+                        "trainset lain tampil 0 karena datanya sudah "
+                        "difilter."
+                    )
                 ts_long = per_ts.reset_index().melt(
                     id_vars="Trainset",
                     var_name="Tindak Lanjut",
