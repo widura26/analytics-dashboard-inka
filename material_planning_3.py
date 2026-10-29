@@ -193,7 +193,14 @@ def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
     tindak = raw["Tindak Lanjut"]
     punya_tindak = tindak.notna() & tindak.astype(str).str.strip().ne("")
 
-    df = raw[punya_tindak].copy()
+    # Tambahkan filter Group jika kolom Group tersedia
+    if "Group" in raw.columns:
+        punya_group = raw["Group"].notna() & raw["Group"].astype(str).str.strip().ne("")
+        mask = punya_tindak & punya_group
+    else:
+        mask = punya_tindak
+
+    df = raw[mask].copy()
     df["Tindak Lanjut"] = df["Tindak Lanjut"].replace(STATUS_RENAME)
 
     for col in QTY_RAW_COLUMNS:
@@ -823,22 +830,18 @@ def render_dashboard():
     sheet_semua = selected_sheet == "Semua"
 
     if sheet_semua:
-        # Logika 'final_bom_data' (algoritma referensi): group by Group,
-        # gabungkan Sheet Asal, paksa WBS Elem = 'S-22002.1' supaya merge SAP
-        # bekerja. Digunakan saat user memilih Sheet Asal = 'Semua'.
         frame = collapse_material_total_trainset(data)
         status_col = "Status PR"
         status_order = STATUS_PR_ORDER
         status_colors = STATUS_PR_COLORS
-        matched = None  # matched berdasarkan collapse_material (group Sheet Asal)
-        # tidak cocok dengan group-by-Group di atas, jadi diabaikan di sini
+        matched = None
     elif mode_semua:
-        frame = matched if matched is not None else collapse_material(data)
+        frame = collapse_material(data)
         status_col = "Status PR"
         status_order = STATUS_PR_ORDER
         status_colors = STATUS_PR_COLORS
     else:
-        frame = attach_match(data, matched) if matched is not None else data
+        frame = data.copy()
         status_col = "Tindak Lanjut"
         status_order = STATUS_ORDER
         status_colors = STATUS_COLORS
@@ -913,6 +916,55 @@ def render_dashboard():
                     )
                     st.plotly_chart(tlchart)
             
+        with st.container(border=True):
+            st.subheader("Komposisi Tindak Lanjut per Trainset")
+            semua_trainset = list(trainset_options[1:])  # tanpa "Semua"
+            per_ts = status_by_trainset(data, all_trainsets=semua_trainset)
+            if per_ts.empty:
+                st.info("Belum ada baris untuk ditampilkan.")
+            else:
+                if mode_semua:
+                    st.caption(
+                        "Persentase dari jumlah baris tiap trainset "
+                        "(Tindak Lanjut per baris, bukan Status PR hasil "
+                        "gabungan lintas trainset)."
+                    )
+                else:
+                    st.caption(
+                        f"Persentase dari jumlah baris {selected_trainset}; "
+                        "trainset lain tampil 0 karena datanya sudah "
+                        "difilter."
+                    )
+                ts_long = per_ts.reset_index().melt(
+                    id_vars="Trainset",
+                    var_name="Tindak Lanjut",
+                    value_name="Persentase (%)",
+                )
+                ts_chart = px.bar(
+                    ts_long,
+                    x="Trainset",
+                    y="Persentase (%)",
+                    color="Tindak Lanjut",
+                    barmode="stack",
+                    color_discrete_map=STATUS_COLORS,
+                    category_orders={
+                        "Trainset": list(per_ts.index),
+                        "Tindak Lanjut": list(per_ts.columns),
+                    },
+                )
+                ts_chart.update_yaxes(ticksuffix="%", range=[0, 100])
+                ts_chart.update_layout(
+                    xaxis_title="Trainset",
+                    yaxis_title="Persentase (%)",
+                    legend=dict(
+                        orientation="h",
+                        yanchor="top",
+                        y=-0.15,
+                        xanchor="center",
+                        x=0.5,
+                    ),
+                )
+                st.plotly_chart(ts_chart, width="stretch", height=450)
 
         with st.container(border=True):
             st.subheader(f"Jumlah per {status_col}")
@@ -934,25 +986,31 @@ def render_dashboard():
             if selected_labels:
                 df_terfilter = frame[frame[status_col].isin(selected_labels)]
 
+            # Filter mismatch SAP tanpa mengubah/menambahkan kolom di df_terfilter
             if matched is not None:
                 if st.toggle(
                     "Hanya baris yang tidak cocok dengan SAP",
                     key="tl_toggle_sap_mismatch",
                 ):
-                    df_terfilter = df_terfilter[
-                        df_terfilter["Hasil Match"] != "SESUAI"
-                    ]
-                if not mode_semua:
-                    st.caption(
-                        "Kolom 'Status SAP', 'Cek Status', 'Cek Qty', "
-                        "'Hasil Match' & 'Selisih Qty' adalah hasil agregat "
-                        "material lintas trainset (sama untuk tiap baris "
-                        "material tsb)."
+                    mismatched = matched[matched["Hasil Match"] != "SESUAI"]
+                    # Ambil kunci yang tidak sesuai
+                    mismatch_keys = set(
+                        zip(
+                            mismatched["NO"].astype(str).str.strip(),
+                            mismatched["Kode Material"].astype(str).str.strip(),
+                            mismatched["Sheet Asal"].astype(str).str.strip(),
+                        )
                     )
+                    curr_keys = zip(
+                        df_terfilter["NO"].astype(str).str.strip(),
+                        df_terfilter["Kode Material"].astype(str).str.strip(),
+                        df_terfilter["Sheet Asal"].astype(str).str.strip(),
+                    )
+                    mask = [k in mismatch_keys for k in curr_keys]
+                    df_terfilter = df_terfilter[mask]
 
             st.subheader(
-                f"Dataset Bill Of Materials"
-                f"({len(df_terfilter):,})"
+                f"Dataset Bill Of Materials ({len(df_terfilter):,})"
             )
             st.dataframe(df_terfilter)
 
@@ -1022,7 +1080,7 @@ def render_dashboard():
                         merge_data = merge_data.drop(columns=["WBS_Group"])
 
                 st.subheader(
-                    f"Merger Dataset ({len(merge_data):,} baris, mengikuti Dataset Bill Of Materials)"
+                    f"Merger Dataset ({len(merge_data):,})"
                 )
                 st.dataframe(merge_data, width="stretch")
 
