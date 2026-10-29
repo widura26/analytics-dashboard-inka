@@ -1,37 +1,3 @@
-"""Statistic Dashboard 2 — progres tindak lanjut material per Trainset.
-
-Halaman analytics yang MENDEPAN sumber data berbeda dari Statistic
-Dashboard (material_planning_2): tidak lewat pipeline ETL/upload file,
-melainkan membaca langsung export CSV dari Google Sheets. Logikanya
-sederhana — filter baris yang sudah punya nilai 'Tindak Lanjut',
-seragamkan label yang mirip, lalu tampilkan sebaran status tindak
-lanjut per 'Sheet Asal' dalam bentuk jumlah item dan persentase.
-
-Dua mode hitung:
-- Trainset spesifik: hitung per baris (satu baris = satu material di
-  satu trainset), sama seperti olahan per-TS.
-- "Semua": material di-collapse dulu LINTAS trainset (kunci
-  NO + Kode Material + Sheet Asal), seluruh nilai Tindak Lanjut-nya
-  disatukan jadi teks koma, lalu diklasifikasi check_pr_status()
-  menjadi 'Status PR' (PR PARSIAL, STOK DAN PR, SUDAH PR, BELUM PR,
-  STOK, STATUS LAIN). Satu material hanya dihitung sekali.
-
-Validasi terhadap SAP (opsional, lihat VALIDASI SAP):
-- Sumbernya export CSV PUBLIK satu spreadsheet SAP (DEFAULT_SAP_URL,
-  gid 826586568) — tanpa upload file Excel, tanpa autentikasi, dan
-  tanpa ikut pipeline ETL dashboard pertama. Filenya besar (±27 MB,
-  ±108 ribu baris) jadi di-cache 1 jam (SAP_CACHE_TTL).
-- Sheet itu memuat banyak proyek (53 kode WBS), sementara data BOM ini
-  satu proyek — karena itu ada filter 'Proyek (WBS)' di baris filter
-  (default "Semua": seluruh WBS ikut dijumlah).
-- Karena Qty SAP adalah total lintas trainset, perhitungan match
-  SELALU di grain material (hasil collapse_material). Di mode
-  trainset hasil match di-broadcast balik ke tiap baris lewat
-  attach_match() — bukan dihitung ulang per baris.
-- Dua sumbu pembuktian terpisah: 'Cek Status' (ada-tidaknya PR di
-  BOM vs ada-tidaknya Qty Requested di SAP) dan 'Cek Qty' (total
-  kebutuhan material vs Qty Requested, toleransi 1%/0.01).
-"""
 import io
 
 import pandas as pd
@@ -41,21 +7,12 @@ import streamlit as st
 
 import material_planning_2 as mp2
 
-# ============================================================
-# CONFIG
-# ============================================================
-
-# Sheet "Tindak Lanjut BOM" — export CSV publik (tanpa autentikasi).
 DEFAULT_BOM_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1axKrvf147x0eQ9hsuHZA4Ur943bzQFttJ6W0oQuK7RQ/"
     "export?format=csv&gid=176301186"
 )
 
-# Sheet "SAP" (menu Statistic Dashboard New Algorithms) — export CSV publik,
-# TANPA upload file Excel dan tanpa autentikasi. Isinya ±108 ribu baris /
-# 12 ribu kode material / 53 WBS dari banyak proyek, jadi hanya kolom yang
-# dipakai yang dibaca (SAP_USE_COLUMNS) dan hasilnya di-cache 1 jam.
 SAP_SHEET_ID = "1jnuEazMkGxbXcvP2mvvGlRZQZR-N0FMPf3aNhw5lH7Q"
 SAP_SHEET_GID = 826586568
 DEFAULT_SAP_URL = (
@@ -63,9 +20,6 @@ DEFAULT_SAP_URL = (
     f"/export?format=csv&gid={SAP_SHEET_GID}"
 )
 
-# Kolom yang dipakai dari sheet SAP. Nama kolom aslinya kotor (mis.
-# '      Ordered' berspasi depan, header ' Item' terduplikasi), jadi
-# pemetaannya lewat mp2.normalize_columns — lihat read_sap_csv().
 SAP_USE_COLUMNS = (
     "WBS Elem",
     "WBS Description",
@@ -77,15 +31,14 @@ SAP_USE_COLUMNS = (
     "Ordered",
     "Purch.Req.",
     "PO Number",
+    "Item",  # Pembeda item dalam PR yang sama (00070 vs 00330)
+    "PR Deliv. Dat",  # Tanggal pengiriman pembeda TS 12 & TS 13
+    "Requested By",  # PPR-STS-TS12 vs PPR-STS-TS13
 )
-# Dua ini minimal; tanpanya validasi tidak bisa jalan (read_sap_csv
-# melempar ValueError, pesannya jadi alasan validasi nonaktif).
+
 SAP_REQUIRED_COLUMNS = ("Kode Material", "Qty Requested")
-# Kolom angka yang dibaca sebagai teks lalu diparse mp2.parse_amount
-# (format Indonesia di sheet ini campur: '56.544' dan '8.200,00').
 SAP_QTY_COLUMNS = ("Qty Requested", "Ordered")
 
-# Urutan status di chart & tabel (reindex: status kosong -> 0).
 STATUS_ORDER = [
     "PR EKSISTING",
     "PR BARU",
@@ -95,13 +48,10 @@ STATUS_ORDER = [
     "MENUNGGU EVALUASI PEMAKAIAN",
 ]
 
-# Label yang ejaannya berbeda di sheet tapi maksudnya sama -> diseragamkan
-# supaya tidak terpecah jadi dua status saat digroupby.
 STATUS_RENAME = {
     "MENGGUNAKAN STOK GUDANG": "MENGGUNAKAN STOK",
 }
 
-# Warna tetap per status supaya konsisten antar chart & rerun.
 STATUS_COLORS = {
     "PR EKSISTING": "#636EFA",
     "PR BARU": "#00CC96",
@@ -111,8 +61,6 @@ STATUS_COLORS = {
     "MENUNGGU EVALUASI PEMAKAIAN": "#FF9896",
 }
 
-# Kategori hasil check_pr_status (mode "Semua"). Urutan = urutan tampil
-# di chart/tabel; STATUS LAIN tetap tampil supaya tidak ada data hilang.
 STATUS_PR_ORDER = [
     "BELUM PR",
     "PR PARSIAL",
@@ -132,56 +80,21 @@ STATUS_PR_COLORS = {
 }
 
 REQUEST_TIMEOUT = 30
-
-# Data Sheets bisa berubah sewaktu-waktu; cache singkat + tombol muat
-# ulang di sidebar supaya perubahan terbaru bisa ditarik paksa.
 DATA_CACHE_TTL = 300
-
-# Sheet SAP jauh lebih besar (±27 MB CSV) — cache 1 jam supaya tidak
-# diunduh tiap rerun; tombol 'Load Data' tetap bisa memaksa tarik ulang.
 SAP_CACHE_TTL = 3600
 SAP_REQUEST_TIMEOUT = 120
 
-# ------------------------------------------------------------
-# VALIDASI SAP
-# ------------------------------------------------------------
-
-# Toleransi kecocokan quantity: selisih dianggap SESUAI bila berada
-# dalam ±1% dari kebutuhan ATAU ±0.01 satuan (pembulatan desimal sheet),
-# mana yang lebih longgar. Angka kecil (qty 0.something) tetap pakai
-# ambang absolut supaya tidak dianggap selisih oleh pembulatan.
 QTY_TOLERANCE_REL = 0.01
 QTY_TOLERANCE_ABS = 0.01
-
-# Kolom 'SUM' di sheet = kebutuhan satu baris trainset (pada sheet
-# Komponen isinya sama dengan 'Kebutuhan', pada sheet Consumable hanya
-# 'SUM' yang terisi), jadi total material = JUMLAH seluruh barisnya.
 QTY_BOM_COLUMN = "SUM"
 QTY_BOM_FALLBACK = "Kebutuhan"
 
-# Kolom qty di export sheet memakai pemisah ribuan gaya Indonesia
-# ('1.056' = 1056, bukan 1.056 — terbukti dari kolom 'Qty PR VE' di baris
-# yang sama yang tertulis polos '1056'). Kolom-kolom ini WAJIB dibaca
-# sebagai TEKS saat load, karena begitu pandas meng-infer-nya jadi float
-# informasi "titiknya pemisah ribuan" hilang selamanya. Pemrosesannya ada
-# di prepare_data() lewat mp2.parse_amount_series.
 QTY_RAW_COLUMNS = ("Kebutuhan", "SUM", "Qty PR VE", "Qty PR MS")
-
-# Kode material: 'Kode Material' dulu; 'Kode Material Konversi' dipakai
-# sebagai kunci cadangan (3.4% baris beda kode — mis. B52TH1222 ->
-# A28RK12017) supaya material tetap bisa dicocokkan ke SAP.
 KEY_MATERIAL = "Kode Material"
 KEY_MATERIAL_ALT = "Kode Material Konversi"
-
-# Kunci collapse (grain material) juga dipakai sebagai kunci broadcast
-# hasil match ke baris trainset.
 MATCH_KEYS = ["NO", KEY_MATERIAL, "Sheet Asal"]
-
-# Urutan 'Status SAP' (turunan dari Qty Requested SAP) — dipakai sebagai
-# kolom matriks bukti (match_crosstab).
 SAP_STATUS_ORDER = ["SUDAH PR", "PR PARSIAL", "BELUM PR", "TIDAK ADA DI SAP"]
 
-# Urutan & warna hasil 'Hasil Match' (ringkasan dua sumbu pembuktian).
 MATCH_ORDER = [
     "SESUAI",
     "QTY TIDAK SESUAI",
@@ -197,7 +110,6 @@ MATCH_COLORS = {
     "TIDAK ADA DI SAP": "#7F7F7F",
 }
 
-# Label pendek untuk kartu KPI (layar sempit bila pakai label penuh).
 MATCH_SHORT_LABEL = {
     "SESUAI": "Sesuai",
     "QTY TIDAK SESUAI": "Qty salah",
@@ -214,18 +126,7 @@ CEK_STATUS_ORDER = [
 ]
 CEK_QTY_ORDER = ["SESUAI", "SAP KURANG", "SAP LEBIH", "TIDAK ADA DI SAP"]
 
-
-# ============================================================
-# DATA
-# ============================================================
-
 def read_bom_csv(content: bytes) -> pd.DataFrame:
-    """Baca export CSV BOM; kolom qty sengaja dibaca sebagai TEKS.
-
-    Header dibaca dulu (nrows=0) hanya untuk tahu kolom mana yang memang
-    ada — dtype untuk kolom yang tidak ada akan membuat read_csv gagal.
-    Alasan kolom qty dipertahankan sebagai teks: lihat QTY_RAW_COLUMNS.
-    """
     buf = io.BytesIO(content)
     header = pd.read_csv(buf, nrows=0).columns
     buf.seek(0)
@@ -235,38 +136,22 @@ def read_bom_csv(content: bytes) -> pd.DataFrame:
 
 @st.cache_data(ttl=DATA_CACHE_TTL, show_spinner="Membaca data BOM dari Google Sheets...")
 def load_bom_data(url: str) -> pd.DataFrame:
-    """Ambil CSV publik Google Sheets -> DataFrame apa adanya."""
     response = requests.get(url, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return read_bom_csv(response.content)
 
 
 def read_sap_csv(content: bytes) -> pd.DataFrame:
-    """Baca export CSV sheet SAP (lihat DEFAULT_SAP_URL) -> frame bersih.
-
-    Hanya kolom SAP_USE_COLUMNS yang diambil dari file ±27 MB, lalu
-    pembersihannya diserahkan ke mp2.clean_sap() — semantiknya persis
-    seperti tab SAP_CLEANED di dashboard pertama (buang duplikat, kode
-    material dirapikan, qty format Indonesia diparse, WBS_Group diekstrak).
-
-    Dua hal yang harus hati-hati:
-    - Nama kolom aslinya kotor ('      Ordered' berspasi depan, header
-      ' Item' terduplikasi), jadi pemetaannya dilakukan dengan mencocokkan
-      nama yang sudah dirapikan, bukan nama literal.
-    - Kolom qty (SAP_QTY_COLUMNS) dibaca sebagai TEKS dulu supaya
-      mp2.parse_amount bisa membedakan '56.544' (= 56544) dan
-      '8.200,00' (= 8200) — bila sudah jadi float, makanya hilang.
-
-    Melempar ValueError bila kolom wajib absen; pemanggil mengubahnya
-    jadi alasan "validasi nonaktif" di dashboard.
-    """
     buf = io.BytesIO(content)
     header = list(pd.read_csv(buf, nrows=0).columns)
 
     def _norm(name) -> str:
         return str(name).replace("\xa0", " ").strip()
 
-    usecols = [col for col in header if _norm(col) in SAP_USE_COLUMNS]
+    # Gunakan dict.fromkeys untuk mencegah duplikasi nama kolom di usecols
+    usecols = list(
+        dict.fromkeys(col for col in header if _norm(col) in SAP_USE_COLUMNS)
+    )
     if not usecols:
         raise ValueError("sheet SAP tidak memuat kolom yang dikenali")
 
@@ -288,20 +173,12 @@ def read_sap_csv(content: bytes) -> pd.DataFrame:
     show_spinner="Membaca data SAP dari sheet publik...",
 )
 def load_sap_data():
-    """Unduh export CSV sheet SAP (DEFAULT_SAP_URL).
-
-    Mengembalikan tuple (DataFrame | None, pesan galat | None). Galat ikut
-    di-cache (sebagai nilai, bukan exception) supaya sumber yang sedang
-    bermasalah tidak membuat unduhan 27 MB diulang tiap rerun.
-    """
     try:
         response = requests.get(DEFAULT_SAP_URL, timeout=SAP_REQUEST_TIMEOUT)
         response.raise_for_status()
     except Exception as exc:
         return None, f"gagal mengunduh sheet SAP: {exc}"
 
-    # Bila sheet tidak di-share publik, Google membalas halaman HTML
-    # (bukan CSV) — lebih jelas pesannya daripada galat parser CSV.
     isi = response.content.lstrip()[:1].lower()
     if isi == b"<":
         return None, "sheet SAP tidak di-share publik (balasannya HTML, bukan CSV)"
@@ -313,17 +190,6 @@ def load_sap_data():
 
 
 def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
-    """Bersihkan data mentah untuk keperluan dashboard.
-
-    - Buang baris tanpa 'Tindak Lanjut' (belum ada keputusan tindak
-      lanjut, jadi tidak ikut perhitungan status). Nilai kosong/putih
-      dianggap kosong juga — "" bukan NaN di mata pandas, padahal tetap
-      berarti "belum ada keputusan".
-    - Seragamkan label status yang bervariasi (STATUS_RENAME).
-    - Seragamkan kolom quantity ke numerik lewat mp2.parse_amount_series:
-      '1.056' (pemisah ribuan gaya Indonesia) jadi 1056, '0,5' jadi 0.5,
-      kolom yang sudah angka diteruskan apa adanya.
-    """
     tindak = raw["Tindak Lanjut"]
     punya_tindak = tindak.notna() & tindak.astype(str).str.strip().ne("")
 
@@ -342,11 +208,6 @@ def count_by_status(
     status_col: str = "Tindak Lanjut",
     order=STATUS_ORDER,
 ) -> pd.DataFrame:
-    """Jumlah baris per `status_col` x 'Sheet Asal' (reindex urut `order`).
-
-    `status_col` = 'Tindak Lanjut' (mode trainset spesifik) atau
-    'Status PR' (mode Semua, lihat collapse_material).
-    """
     counts = (
         df.groupby([status_col, "Sheet Asal"])
         .size()
@@ -362,12 +223,6 @@ def percentage_by_status(counts: pd.DataFrame) -> pd.DataFrame:
     total_items = counts.sum(axis=0)
     return counts.div(total_items, axis=1).mul(100).round(2)
 
-
-
-# ============================================================
-# MODE "SEMUA": COLLAPSE PER MATERIAL + KLASIFIKASI STATUS PR
-# ============================================================
-
 def check_pr_status(text) -> str:
     if pd.isna(text) or not str(text).strip():
         return "BELUM PR"
@@ -377,9 +232,6 @@ def check_pr_status(text) -> str:
         for status in str(text).split(",")
     }
 
-    # 1. PR PARSIAL
-    # Jika terdapat PR BARU dan BELUM PR
-    # atau PR BARU bersama MENUNGGU EVALUASI PEMAKAIAN
     if (
         "PR BARU" in arr_status
         and (
@@ -389,9 +241,6 @@ def check_pr_status(text) -> str:
     ):
         return "PR PARSIAL"
 
-    # 2. STOK DAN PR
-    # PR BARU atau PR EKSISTING bersama MENGGUNAKAN STOK,
-    # selama tidak memenuhi kondisi PR PARSIAL
     if (
         "MENGGUNAKAN STOK" in arr_status
         and (
@@ -401,18 +250,15 @@ def check_pr_status(text) -> str:
     ):
         return "STOK DAN PR"
 
-    # 3. STOK
     if arr_status == {"MENGGUNAKAN STOK"}:
         return "STOK"
 
-    # 4. SUDAH PR
     if (
         "PR BARU" in arr_status
         or "PR EKSISTING" in arr_status
     ):
         return "SUDAH PR"
 
-    # 5. BELUM PR
     if (
         "BELUM PR" in arr_status
         or "MENUNGGU EVALUASI PEMAKAIAN" in arr_status
@@ -423,18 +269,6 @@ def check_pr_status(text) -> str:
 
 
 def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
-    """Satukan seluruh baris per material LINTAS trainset jadi satu baris.
-
-    Kunci: NO + Kode Material + Sheet Asal. NO di-cast ke str dulu
-    (persis olahan asli) supaya baris tanpa NO tidak terbuang oleh
-    groupby default. Semua nilai 'Tindak Lanjut' unik disatukan jadi teks
-    koma (urut kata kedua, deterministic), lalu diklasifikasi menjadi
-    kolom 'Status PR' oleh check_pr_status().
-
-    Kenapa bukan kunci 'Kode Material' saja: 60 kode material punya >1
-    baris NO (784 grup vs 446 kode unik) — memakai NO menjaga baris
-    sheet yang memang terpisah tetap terpisah.
-    """
     df = data.copy()
     df["NO"] = df["NO"].astype(str).str.strip()
 
@@ -452,38 +286,27 @@ def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
     desc = grouped["Deskripsi Material"].first().reset_index()
     joined = pd.merge(joined, desc, on=MATCH_KEYS, how="left")
 
-    # Total kebutuhan material LINTAS trainset: kolom 'SUM' dijumlah per
-    # grup (nilainya per baris trainset — lihat QTY_BOM_COLUMN). Bila sheet
-    # sumber tidak memuat 'SUM', fallback ke 'Kebutuhan'. Inilah angka yang
-    # dipakai 'Cek Qty' terhadap SAP.
     qty_col = (
         QTY_BOM_COLUMN
         if QTY_BOM_COLUMN in df.columns
         else (QTY_BOM_FALLBACK if QTY_BOM_FALLBACK in df.columns else None)
     )
     if qty_col:
-        qty = grouped[qty_col].sum().reset_index(name="Kebutuhan Total")
+        qty = grouped[qty_col].sum().reset_index(name="Kebutuhan")
         joined = pd.merge(joined, qty, on=MATCH_KEYS, how="left")
 
-    # Qty PR yang tercatat di sheet (VE + MS) — hanya informatif di tabel,
-    # pembanding resminya tetap 'Qty Requested' SAP.
     pr_cols = [c for c in ("Qty PR VE", "Qty PR MS") if c in df.columns]
     if pr_cols:
         pr = grouped[pr_cols].sum().reset_index()
-        pr["Qty PR (Sheet)"] = pr[pr_cols].sum(axis=1)
+        pr["Qty PR (BOM)"] = pr[pr_cols].sum(axis=1)
         joined = pd.merge(
-            joined, pr[MATCH_KEYS + ["Qty PR (Sheet)"]], on=MATCH_KEYS, how="left"
+            joined, pr[MATCH_KEYS + ["Qty PR (BOM)"]], on=MATCH_KEYS, how="left"
         )
 
-    # Kunci cadangan saat match ke SAP: sebagian baris memuat kode hasil
-    # konversi yang berbeda dari 'Kode Material' (mis. B52TH1222 ->
-    # A28RK12017), kode inilah yang kadang tercatat di SAP.
     if KEY_MATERIAL_ALT in df.columns:
         alt = grouped[KEY_MATERIAL_ALT].first().reset_index()
         joined = pd.merge(joined, alt, on=MATCH_KEYS, how="left")
 
-    # Daftar trainset yang menyumbang material ini (urut nomor TS,
-    # mis. "TS 9, TS 10, ..., TS 16") — informatif di tabel detail.
     joined["Trainset"] = grouped["Trainset"].apply(
         lambda s: ", ".join(
             sorted(
@@ -494,16 +317,79 @@ def collapse_material(data: pd.DataFrame) -> pd.DataFrame:
     ).values
 
     joined["Status PR"] = joined["Tindak Lanjut"].apply(check_pr_status)
-
     return joined
 
 
-# ============================================================
-# VALIDASI SAP (match status PR + quantity)
-# ============================================================
+def collapse_material_total_trainset(data: pd.DataFrame) -> pd.DataFrame:
+    """Gabungkan baris BOM seperti 'final_bom_data' pada algoritma referensi:
+
+    - Group by ['NO', 'Kode Material', 'Group'] (bukan 'Sheet Asal')
+    - Gabungkan nilai 'Trainset' dan 'Sheet Asal' menjadi string pemisah koma
+    - Terapkan check_pr_status pada 'Tindak Lanjut' yang sudah digabung
+    - Paksa 'WBS Elem' = 'S-22002.1' supaya inner-join dengan SAP (WBS_Group)
+      bisa bekerja sebagaimana algoritma referensi.
+    """
+    df = data.copy()
+    df["NO"] = df["NO"].astype(str).str.strip()
+
+    grouped = df.groupby(["NO", "Kode Material", "Group"], dropna=False)
+
+    joined_tl = grouped["Tindak Lanjut"].apply(
+        lambda s: ", ".join(sorted(s.unique(), key=lambda t: str(t)))
+    ).reset_index()
+
+    desc = grouped["Deskripsi Material"].first().reset_index()
+    joined_tl = pd.merge(
+        joined_tl, desc, on=["NO", "Kode Material", "Group"], how="left"
+    )
+
+    qty_col = (
+        QTY_BOM_COLUMN
+        if QTY_BOM_COLUMN in df.columns
+        else (QTY_BOM_FALLBACK if QTY_BOM_FALLBACK in df.columns else None)
+    )
+    if qty_col:
+        qty = grouped[qty_col].sum().reset_index(name="Kebutuhan")
+        joined_tl = pd.merge(
+            joined_tl, qty, on=["NO", "Kode Material", "Group"], how="left"
+        )
+
+    pr_cols = [c for c in ("Qty PR VE", "Qty PR MS") if c in df.columns]
+    if pr_cols:
+        pr = grouped[pr_cols].sum().reset_index()
+        pr["Qty PR (BOM)"] = pr[pr_cols].sum(axis=1)
+        joined_tl = pd.merge(
+            joined_tl,
+            pr[["NO", "Kode Material", "Group", "Qty PR (BOM)"]],
+            on=["NO", "Kode Material", "Group"],
+            how="left",
+        )
+
+    if KEY_MATERIAL_ALT in df.columns:
+        alt = grouped[KEY_MATERIAL_ALT].first().reset_index()
+        joined_tl = pd.merge(
+            joined_tl, alt, on=["NO", "Kode Material", "Group"], how="left"
+        )
+
+    joined_tl["Trainset"] = grouped["Trainset"].apply(
+        lambda s: ", ".join(
+            sorted(
+                s.dropna().unique(),
+                key=lambda t: int(t.split()[1]) if t.split()[1].isdigit() else 0,
+            )
+        )
+    ).values
+
+    joined_tl["Sheet Asal"] = grouped["Sheet Asal"].apply(
+        lambda s: ", ".join(sorted(s.unique()))
+    ).values
+
+    joined_tl["Status PR"] = joined_tl["Tindak Lanjut"].apply(check_pr_status)
+    joined_tl["WBS Elem"] = "S-22002.1"
+    return joined_tl
+
 
 def norm_key(value) -> str:
-    """Seragamkan kode material untuk pencocokan (trim + huruf besar)."""
     if value is None or pd.isna(value):
         return ""
     text = str(value).strip().upper()
@@ -511,25 +397,12 @@ def norm_key(value) -> str:
 
 
 def qty_tolerance(kebutuhan) -> float:
-    """Ambang selisih qty yang masih dianggap SESUAI.
-
-    Relatif 1% dari kebutuhan ATAU absolut 0.01 satuan — ambil yang lebih
-    longgar, supaya pembulatan desimal sheet tidak menghasilkan selisih
-    palsu (kebutuhan 0 -> tetap pakai ambang absolut).
-    """
     if kebutuhan is None or pd.isna(kebutuhan):
         return QTY_TOLERANCE_ABS
     return max(QTY_TOLERANCE_ABS, abs(float(kebutuhan)) * QTY_TOLERANCE_REL)
 
 
 def derive_status_sap(qty_requested, kebutuhan) -> str:
-    """Status PR versi SAP, diturunkan dari 'Qty Requested'-nya.
-
-    - NaN            -> TIDAK ADA DI SAP (material tidak muncul di export)
-    - <= 0           -> BELUM PR (tidak ada baris PR)
-    - < kebutuhan    -> PR PARSIAL (ada PR tapi kurang dari kebutuhan)
-    - >= kebutuhan   -> SUDAH PR
-    """
     if qty_requested is None or pd.isna(qty_requested):
         return "TIDAK ADA DI SAP"
     if float(qty_requested) <= 0:
@@ -541,22 +414,14 @@ def derive_status_sap(qty_requested, kebutuhan) -> str:
 
 
 def canonical_bom_status(status_pr: str) -> str:
-    """Petakan 'Status PR' BOM ke vocabulary bersama (vs SAP).
-
-    Sisi BOM membedakan STOK/STOK DAN PR, sisi SAP hanya bisa memberi
-    tahu ada-tidaknya Qty Requested — jadi perbandingannya di level
-    "ADA PR" vs "BELUM PR". Sumbu "kurang/lebih"-nya qty diukur terpisah
-    oleh check_qty_match().
-    """
     if status_pr in ("SUDAH PR", "PR PARSIAL", "STOK DAN PR"):
         return "ADA PR"
     if status_pr in ("STOK", "BELUM PR"):
         return "BELUM PR"
-    return "TIDAK DIKENAL"  # 'STATUS LAIN / TIDAK DIKENAL'
+    return "TIDAK DIKENAL"
 
 
 def check_status_match(status_pr, qty_requested) -> str:
-    """Kecocokan ADA-tidaknya PR: BOM ('Status PR') vs SAP (Qty Requested)."""
     if qty_requested is None or pd.isna(qty_requested):
         return "TIDAK ADA DI SAP"
     if status_pr is None or pd.isna(status_pr):
@@ -571,7 +436,6 @@ def check_status_match(status_pr, qty_requested) -> str:
 
 
 def check_qty_match(qty_requested, kebutuhan) -> str:
-    """Kecocokan quantity: kebutuhan total material vs 'Qty Requested' SAP."""
     if qty_requested is None or pd.isna(qty_requested):
         return "TIDAK ADA DI SAP"
 
@@ -583,11 +447,6 @@ def check_qty_match(qty_requested, kebutuhan) -> str:
 
 
 def build_hasil_match(cek_status: str, cek_qty: str) -> str:
-    """Ringkasan dua sumbu pembuktian jadi satu label 'Hasil Match'.
-
-    'TIDAK DIKENAL' pada status dihitung tidak sesuai — status yang tidak
-    bisa dipastikan memang belum terbukti konsisten.
-    """
     if "TIDAK ADA DI SAP" in (cek_status, cek_qty):
         return "TIDAK ADA DI SAP"
     if cek_status == "SESUAI" and cek_qty == "SESUAI":
@@ -598,16 +457,6 @@ def build_hasil_match(cek_status: str, cek_qty: str) -> str:
 
 
 def aggregate_sap_for_match(sap: pd.DataFrame) -> pd.DataFrame:
-    """Satukan baris SAP ke grain SATU baris per Kode Material.
-
-    Satu kode bisa punya banyak baris di SAP (lintas WBS / lintas PR), jadi
-    'Qty Requested' & 'Ordered' dijumlah, sedangkan 'PR Status' dan 'WBS
-    Elem' disatukan jadi teks koma unik. Kolom hasil memakai akhiran
-    '(SAP)' supaya tidak bentrok dengan kolom BOM saat di-merge.
-
-    Melempar ValueError bila kolom wajib absen (pemanggil menampilkan
-    pesannya, validasi dimatikan, dashboard tetap jalan).
-    """
     missing = [c for c in ("Kode Material", "Qty Requested") if c not in sap.columns]
     if missing:
         raise ValueError("data SAP tanpa kolom: " + ", ".join(missing))
@@ -618,8 +467,6 @@ def aggregate_sap_for_match(sap: pd.DataFrame) -> pd.DataFrame:
     if work.empty:
         raise ValueError("data SAP tanpa kode material")
 
-    # Angka dari export bisa berbentuk teks ('1.234,5' / '10') — nilainya
-    # diseragamkan dulu supaya sum() tidak sial menjumlah string ("10"+"5").
     work["Qty Requested"] = pd.to_numeric(work["Qty Requested"], errors="coerce")
     if "Ordered" in work.columns:
         work["Ordered"] = pd.to_numeric(work["Ordered"], errors="coerce")
@@ -645,38 +492,23 @@ def aggregate_sap_for_match(sap: pd.DataFrame) -> pd.DataFrame:
     return out.rename(
         columns={
             "Kode Material": "Kode Material (SAP)",
-            "Qty Requested": "Qty Requested (SAP)",
-            "Ordered": "Ordered (SAP)",
+            "Qty Requested": "Qty Requested",
+            "Ordered": "Ordered",
             "PR Status": "PR Status (SAP)",
-            "WBS Elem": "WBS (SAP)",
         }
     )
-
 
 MATCH_RESULT_COLUMNS = [
     "Status SAP",
     "Cek Status",
     "Cek Qty",
     "Hasil Match",
-    "Selisih Qty",
-    "Qty Requested (SAP)",
-    "Kebutuhan Total",
+    "Qty Requested",
+    "Kebutuhan",
+    "Baris SAP"
 ]
 
-
 def match_with_sap(data: pd.DataFrame, sap: pd.DataFrame) -> pd.DataFrame:
-    """Cocokkan material hasil collapse dengan data SAP (LEFT join).
-
-    Grain keluaran = grain collapse_material (NO + Kode Material +
-    Sheet Asal), sehingga satu baris = satu material dan quantity
-    BOM-nya sudah total lintas trainset — satu-satunya grain yang adil
-    untuk dibandingkan dengan Qty Requested SAP.
-
-    Kunci: 'Kode Material' dulu, lalu 'Kode Material Konversi' bila kode
-    utama tidak ada di SAP. Bukan inner join: material yang TIDAK ADA di
-    SAP justru wajib tampil (itu bagian dari bukti konsistensi), makanya
-    pakai left join + label 'TIDAK ADA DI SAP'.
-    """
     mat = collapse_material(data)
     sap_agg = aggregate_sap_for_match(sap)
 
@@ -699,19 +531,10 @@ def match_with_sap(data: pd.DataFrame, sap: pd.DataFrame) -> pd.DataFrame:
         right_on="_key",
         how="left",
     )
-
-    # Kode utama tidak tercatat di SAP tapi kode konversinya ada —
-    # ditandai supaya user tahu kunci cadanganlah yang dipakai.
-    out["Cocok via Kode Konversi"] = (
-        (out["_key_sap"] != "")
-        & (out[KEY_MATERIAL].map(norm_key) != out["_key_sap"])
-    )
     out = out.drop(columns=["_key", "_key_sap"])
 
-    qty = pd.to_numeric(out.get("Qty Requested (SAP)"), errors="coerce")
-    keb = pd.to_numeric(out.get("Kebutuhan Total"), errors="coerce")
-
-    out["Selisih Qty"] = qty - keb
+    qty = pd.to_numeric(out.get("Qty Requested"), errors="coerce")
+    keb = pd.to_numeric(out.get("Kebutuhan"), errors="coerce")
     out["Status SAP"] = [
         derive_status_sap(q, k) for q, k in zip(qty, keb)
     ]
@@ -728,16 +551,6 @@ def match_with_sap(data: pd.DataFrame, sap: pd.DataFrame) -> pd.DataFrame:
 
 
 def attach_match(rows: pd.DataFrame, matched: pd.DataFrame) -> pd.DataFrame:
-    """Bawa kolom hasil match ke frame baris (mode trainset spesifik).
-
-    Hasil match dihitung sekali di grain material (lihat match_with_sap),
-    lalu di-BROADCAST ke tiap baris trainset lewat kunci collapse — bukan
-    dihitung ulang per baris. Akibatnya 'Selisih Qty' di baris trainset =
-    selisih material (lintas trainset), bukan selisih baris itu sendiri.
-
-    Kunci di-cast ke str di kedua sisi supaya baris tanpa NO / tanpa kode
-    material tetap ketemu (NaN -> string 'nan' di kedua sisi).
-    """
     cols = [
         c
         for c in MATCH_RESULT_COLUMNS + ["Cocok via Kode Konversi"]
@@ -752,27 +565,17 @@ def attach_match(rows: pd.DataFrame, matched: pd.DataFrame) -> pd.DataFrame:
             frame[f"_k_{key}"] = frame[key].astype(str).str.strip()
     join_cols = [f"_k_{key}" for key in MATCH_KEYS]
 
-    # Kunci asli di frame kanan dibuang supaya merge tidak menghasilkan
-    # kolom bersufiks _x/_y ('Kode Material' dst. sudah ada di frame kiri).
     merged = left.merge(right.drop(columns=MATCH_KEYS), on=join_cols, how="left")
     return merged.drop(columns=join_cols)
 
 
 def match_summary(matched: pd.DataFrame) -> pd.Series:
-    """Jumlah material per label 'Hasil Match' (urut MATCH_ORDER, 0 diisi)."""
     if matched.empty or "Hasil Match" not in matched.columns:
         return pd.Series(0, index=MATCH_ORDER, name="Jumlah")
     counts = matched["Hasil Match"].value_counts()
     return counts.reindex(MATCH_ORDER, fill_value=0).astype(int).rename("Jumlah")
 
-
 def match_crosstab(matched: pd.DataFrame) -> pd.DataFrame:
-    """Matriks bukti: 'Status PR' BOM (baris) x 'Status SAP' (kolom).
-
-    Dihitung dari frame material (bukan frame baris) supaya satu material
-    tidak terhitung berkali-kali. Reindex agar status yang tidak muncul
-    tetap terlihat sebagai baris/kolom 0 — tidak ada temuan yang hilang.
-    """
     empty = pd.DataFrame(0, index=STATUS_PR_ORDER, columns=SAP_STATUS_ORDER)
     if matched.empty or "Status SAP" not in matched.columns:
         return empty
@@ -786,32 +589,11 @@ def match_crosstab(matched: pd.DataFrame) -> pd.DataFrame:
 
 
 def cek_counts(matched: pd.DataFrame, col: str, order) -> pd.Series:
-    """Jumlah material per label kolom `col` ('Cek Status' / 'Cek Qty').
-
-    Reindex dengan `order` masing-masing sumbu supaya label yang tidak
-    muncul tetap terlihat sebagai 0 — tidak ada temuan yang hilang.
-    """
     if matched.empty or col not in matched.columns:
         return pd.Series(0, index=list(order), dtype=int, name=col)
     return matched[col].value_counts().reindex(order, fill_value=0).astype(int).rename(col)
 
-
-# ============================================================
-# AGREGASI CHART TAMBAHAN (TREN DELIV DATE)
-# ============================================================
-
 def build_delivery_trend(df: pd.DataFrame) -> pd.DataFrame:
-    """Jumlah item per bulan kolom 'Deliv Date SAP' (format dd.mm.yyyy).
-
-    Bulan tanpa pengiriman di tengah rentang direindex jadi 0, supaya
-    celah timeline terlihat apa adanya (mis. tidak ada pengiriman antara
-    2024-10 dan 2025-03). Baris tanpa tanggal / tanggal tidak valid
-    tidak dihitung — pemanggil bisa membandingkan sum(Jumlah) dengan
-    len(df) untuk tahu sisanya.
-
-    Mengembalikan frame ['Bulan' (string 'YYYY-MM', urut), 'Jumlah'].
-    Kosong bila kolomnya tidak ada atau tidak ada satu pun tanggal valid.
-    """
     if "Deliv Date SAP" not in df.columns:
         return pd.DataFrame(columns=["Bulan", "Jumlah"])
 
@@ -827,27 +609,11 @@ def build_delivery_trend(df: pd.DataFrame) -> pd.DataFrame:
     out["Bulan"] = out["Bulan"].astype(str)
     return out
 
-
 def status_by_trainset(
     df: pd.DataFrame,
     order=STATUS_ORDER,
     all_trainsets=None,
 ) -> pd.DataFrame:
-    """Persentase komposisi 'Tindak Lanjut' per Trainset (stack 100%).
-
-    Dihitung dari baris apa adanya, BUKAN dari 'Status PR' hasil
-    collapse — semua material punya baris di setiap trainset, jadi
-    Status PR akan menghasilkan batang identik di semua trainset.
-    Nilai = (jumlah baris per status / total baris trainset) x 100.
-
-    all_trainsets: daftar lengkap trainset yang harus tampil di sumbu-X.
-    Trainset tanpa baris di df (mis. difilter keluar) tetap muncul
-    dengan nilai 0, jadi chart tidak menyusut saat filter menyempit.
-
-    Urutan baris = numerik (TS 9, TS 10, ..., TS 16); status yang tidak
-    muncul di data dibuang dari kolom (legend tidak menampilkan kategori
-    kosong). Mengembalikan frame kosong bila datanya kosong.
-    """
     if df.empty or "Trainset" not in df.columns:
         return pd.DataFrame()
 
@@ -867,22 +633,11 @@ def status_by_trainset(
     total = total.where(total > 0)  # 0 -> NaN, dibuang di fillna
     return ctab.div(total, axis=0).fillna(0) * 100
 
-
-# ============================================================
-# SIDEBAR
-# ============================================================
-
 def reset_sidebar():
-    """Bersihkan cache data sumber.
-
-    Dipakai sebagai on_click callback.
-    """
     st.cache_data.clear()
-
 
 def render_sidebar():
     with st.sidebar:
-
         if st.button(
             "Load Data",
             width="stretch",
@@ -893,9 +648,6 @@ def render_sidebar():
 
         st.divider()
 
-        # Validasi terhadap SAP: sumbernya satu spreadsheet SAP yang
-        # di-export sebagai CSV publik (DEFAULT_SAP_URL) — tanpa upload
-        # file Excel dan tanpa mengubah apa pun di spreadsheet itu.
         st.toggle(
             "Validasi terhadap SAP",
             value=True,
@@ -917,11 +669,6 @@ def render_sidebar():
             on_click=reset_sidebar,
         )
 
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
 def scope_sap(sap, wbs: str = "Semua"):
     if sap is None:
         return None
@@ -933,14 +680,6 @@ def scope_sap(sap, wbs: str = "Semua"):
 
 
 def load_match(data: pd.DataFrame, sap):
-    """Hitung hasil match BOM <-> SAP untuk `data` (grain material).
-
-    `sap` sudah disaring lewat scope_sap() di pemanggil supaya pilihan
-    filter WBS dan data yang dipakai tidak bisa meleset. Mengembalikan
-    None bila validasi dimatikan di sidebar atau data SAP tidak tersedia
-    — pesannya tampil sebagai caption dan dashboard tetap berjalan tanpa
-    kolom match (perilaku lama persis).
-    """
     if not st.session_state.get("mp3_validasi_sap", True):
         return None
 
@@ -985,9 +724,7 @@ def render_sap_data() -> None:
         'Qty Requested': 'sum',
         'Ordered': 'sum'
     })
-    with st.container(border=True):
-        st.subheader(f"SAP Dataset ({ len(filtered_sap_data[filtered_sap_data['WBS_Group'] == 'S-22002.1']) })")
-        st.dataframe(filtered_sap_data[filtered_sap_data['WBS_Group'] == 'S-22002.1'])
+    return filtered_sap_data
 
 
 def render_dashboard():
@@ -1018,10 +755,6 @@ def render_dashboard():
     else:
         sap = None
 
-    # ------------------------------------------------------------
-    # Filter (di luar container utama, seperti dashboard pertama)
-    # ------------------------------------------------------------
-
     trainset_options = ("Semua",) + tuple(sorted(data["Trainset"].dropna().unique()))
     col_trainset, col_sheet = st.columns([1, 1])
     with col_trainset:
@@ -1040,8 +773,6 @@ def render_dashboard():
         data = data[data["Sheet Asal"] == selected_sheet]
         data_lintas_ts = data_lintas_ts[data_lintas_ts["Sheet Asal"] == selected_sheet]
 
-    # Filter WBS hanya muncul bila SAP terbaca; default "Semua" =
-    # seluruh proyek ikut dijumlah (lihat scope_sap).
     selected_wbs = "Semua"
     if sap is not None and "WBS Elem" in sap.columns:
         wbs_options = ["Semua"] + sorted(
@@ -1089,10 +820,19 @@ def render_dashboard():
         sumber = ""
 
     mode_semua = selected_trainset == "Semua"
+    sheet_semua = selected_sheet == "Semua"
 
-    if mode_semua:
-        # matched = collapse_material(data_lintas_ts) + kolom match,
-        # jadi di mode ini frame-nya sudah persis grain collapse.
+    if sheet_semua:
+        # Logika 'final_bom_data' (algoritma referensi): group by Group,
+        # gabungkan Sheet Asal, paksa WBS Elem = 'S-22002.1' supaya merge SAP
+        # bekerja. Digunakan saat user memilih Sheet Asal = 'Semua'.
+        frame = collapse_material_total_trainset(data)
+        status_col = "Status PR"
+        status_order = STATUS_PR_ORDER
+        status_colors = STATUS_PR_COLORS
+        matched = None  # matched berdasarkan collapse_material (group Sheet Asal)
+        # tidak cocok dengan group-by-Group di atas, jadi diabaikan di sini
+    elif mode_semua:
         frame = matched if matched is not None else collapse_material(data)
         status_col = "Status PR"
         status_order = STATUS_PR_ORDER
@@ -1223,17 +963,68 @@ def render_dashboard():
                 mime="text/csv",
             )
 
-        render_sap_data()
+        with st.container(border=True):
+            # SAP Dataset ditampilkan terlepas pilihan Sheet Asal (Semua atau spesifik).
+            try:
+                sap_full = render_sap_data()
+                filtered_sap_data = sap_full[
+                    sap_full["WBS_Group"] == "S-22002.1"
+                ]
+            except Exception as exc:
+                st.error(f"Gagal memuat data SAP: {exc}")
+                filtered_sap_data = pd.DataFrame()
+
+            st.subheader(f"SAP Dataset ({len(filtered_sap_data)})")
+            if filtered_sap_data.empty:
+                st.info("Tidak ada data SAP untuk ditampilkan.")
+            else:
+                st.dataframe(filtered_sap_data, width="stretch")
 
         with st.container(border=True):
-            merge_data = pd.merge(
-                filtered_bom_data,
-                filtered_sap_data,
-                left_on=['Kode Material', 'WBS Elem'],
-                right_on=['Kode Material', 'WBS_Group'],
-                how='inner'
-            )
-            st.subheader("Match dataset")
+            if filtered_sap_data.empty:
+                st.info("Data SAP tidak tersedia, merger dataset tidak bisa ditampilkan.")
+            else:
+                sap_cols_already = any(
+                    c in df_terfilter.columns for c in ("Qty Requested", "Status SAP")
+                )
+
+                if sap_cols_already:
+                    merge_data = df_terfilter.copy()
+                    if "Kebutuhan" in merge_data.columns and "Qty Requested" in merge_data.columns:
+                        pass  # sudah ada berdampingan
+                else:
+                    bom_for_merge = df_terfilter.copy()
+                    if "WBS Elem" not in bom_for_merge.columns:
+                        bom_for_merge["WBS Elem"] = "S-22002.1"
+
+                    sap_for_merge = filtered_sap_data.copy()
+                    rename_map = {
+                        "Qty Requested": "Qty Requested",
+                        "Ordered": "Ordered",
+                        "PR Status": "PR Status (SAP)",
+                    }
+                    sap_for_merge = sap_for_merge.rename(
+                        columns={k: v for k, v in rename_map.items() if k in sap_for_merge.columns}
+                    )
+                    drop_cols = [c for c in ("WBS Description", "Mat. Description", "Spesifikasi")
+                                 if c in sap_for_merge.columns and c in bom_for_merge.columns]
+                    sap_for_merge = sap_for_merge.drop(columns=drop_cols, errors="ignore")
+
+                    merge_data = pd.merge(
+                        bom_for_merge,
+                        sap_for_merge,
+                        left_on=["Kode Material", "WBS Elem"],
+                        right_on=["Kode Material", "WBS_Group"],
+                        how="left",
+                    )
+                    # Hapus kunci SAP yang duplikat setelah merge.
+                    if "WBS_Group" in merge_data.columns:
+                        merge_data = merge_data.drop(columns=["WBS_Group"])
+
+                st.subheader(
+                    f"Merger Dataset ({len(merge_data):,} baris, mengikuti Dataset Bill Of Materials)"
+                )
+                st.dataframe(merge_data, width="stretch")
 
 def render():
     st.title("Statistics Dashboard")
