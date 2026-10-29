@@ -923,13 +923,6 @@ def render_sidebar():
 # ============================================================
 
 def scope_sap(sap, wbs: str = "Semua"):
-    """Saring frame SAP ke satu WBS bila diminta; 'Semua' = tanpa saringan.
-
-    Kebutuhan BOM di sini hanya satu proyek, sedangkan sheet SAP berisi
-    banyak proyek (±53 kode WBS). Tanpa saringan, qty SAP tercampur lintas
-    proyek sehingga material yang dipakai bersama beberapa proyek terlihat
-    'SAP LEBIH' padahal bukan milik proyek ini.
-    """
     if sap is None:
         return None
 
@@ -964,86 +957,37 @@ def load_match(data: pd.DataFrame, sap):
         st.caption(f"Validasi SAP tidak aktif: {exc}.")
         return None
 
+@st.cache_data(ttl=DATA_CACHE_TTL, show_spinner="Membaca data BOM dari Google Sheets...")
+def render_sap_data() -> None:
+    sap_url_data = DEFAULT_SAP_URL
+    sap_data = pd.read_csv(sap_url_data, low_memory=False)
+    sap_data.drop_duplicates(inplace=True)
 
-def render_validation(matched: pd.DataFrame, sumber: str = "") -> None:
-    """Panel bukti konsistensi BOM <-> SAP (grain material).
+    sap_data.columns = sap_data.columns.str.strip()
 
-    Isinya: kartu KPI per 'Hasil Match', matriks 'Status PR' x 'Status
-    SAP', dan sebaran hasil match. Semua dihitung dari frame material —
-    bukan frame baris — supaya satu material tidak dihitung berkali-kali.
-    `sumber` (opsional) menjelaskan berapa baris sheet SAP yang dipakai
-    dan apakah sudah disaring ke satu WBS.
-    """
+    sap_data['Qty Requested'] = (sap_data['Qty Requested'].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False))
+    sap_data['Qty Requested'] = (pd.to_numeric(sap_data['Qty Requested'], errors='coerce').fillna(0).astype(int))
+
+    sap_data['Ordered'] = pd.to_numeric(sap_data['Ordered'].str.replace(',', '').str.replace('.', ''), errors='coerce')
+    sap_data['Ordered'] = sap_data['Ordered'].fillna(0).astype(int)
+
+    sap_data['Req.Date'] = pd.to_datetime(sap_data['Req.Date'], format='%d.%m.%Y')
+    sap_data['PR Deliv. Dat'] = pd.to_datetime(sap_data['PR Deliv. Dat'], format='%d.%m.%Y')
+    sap_data['Chngd on'] = pd.to_datetime(sap_data['Chngd on'], format='%d.%m.%Y')
+    sap_data["WBS_Group"] = sap_data["WBS Elem"].str.extract(r"^([A-Z]-\d+\.\d+)")
+
+    sap_data = sap_data[sap_data["Kode Material"].notna()]
+    filtered_sap_data = sap_data.groupby(['Kode Material', 'WBS_Group'], as_index=False).agg({
+        'WBS Description': 'first',
+        'Mat. Description': 'first',
+        'Spesifikasi': 'first',
+        'PR Status': 'first',
+        'Qty Requested': 'sum',
+        'Ordered': 'sum'
+    })
     with st.container(border=True):
-        st.subheader("Validasi terhadap SAP")
-
-        if matched.empty:
-            st.info("Tidak ada material untuk divalidasi.")
-            return
-
-        st.caption(
-            f"Grain: satu baris per material (lintas trainset). "
-            f"Kebutuhan = jumlah kolom '{QTY_BOM_COLUMN}', pembanding = "
-            f"'Qty Requested' SAP (toleransi {QTY_TOLERANCE_REL:.0%} atau "
-            f"{QTY_TOLERANCE_ABS} satuan). 'Cek Status' membandingkan "
-            "ada-tidaknya PR di kedua sisi. Kolom qty memakai pemisah "
-            "ribuan gaya Indonesia, sudah dinormalkan ('1.056' -> 1056)."
-            + (f" Sumber: {sumber}." if sumber else "")
-        )
-
-        summary = match_summary(matched)
-        total = len(matched)
-        sesuai = int(summary["SESUAI"])
-
-        kpi_cols = st.columns(len(MATCH_ORDER))
-        for col, label in zip(kpi_cols, MATCH_ORDER):
-            with col:
-                st.subheader(MATCH_SHORT_LABEL[label])
-                st.markdown(f"# {int(summary[label]):,}")
-
-        st.caption(
-            f"Material divalidasi: {total:,} | sesuai: {sesuai:,} "
-            f"({sesuai / total * 100:.1f}%) | "
-            f"tidak sesuai: {total - sesuai:,}"
-        )
-
-        col_matrix, col_chart = st.columns(2, border=True)
-        with col_matrix:
-            st.markdown("**Status PR (BOM) x Status SAP**")
-            st.dataframe(match_crosstab(matched))
-        with col_chart:
-            st.markdown("**Sebaran Hasil Match**")
-            bar = summary[summary > 0].reset_index()
-            bar.columns = ["Hasil Match", "Jumlah"]
-            if bar.empty:
-                st.info("Belum ada data untuk ditampilkan.")
-            else:
-                match_chart = px.pie(
-                    bar,
-                    values="Jumlah",
-                    names="Hasil Match",
-                    hole=0.3,
-                    color="Hasil Match",
-                    color_discrete_map=MATCH_COLORS,
-                )
-                match_chart.update_layout(
-                    legend=dict(
-                        orientation="h",
-                        yanchor="top",
-                        y=-0.1,
-                        xanchor="center",
-                        x=0.5,
-                    )
-                )
-                st.plotly_chart(match_chart, width="stretch")
-
-        col_status, col_qty = st.columns(2, border=True)
-        with col_status:
-            st.markdown("**Rincian Cek Status**")
-            st.dataframe(cek_counts(matched, "Cek Status", CEK_STATUS_ORDER))
-        with col_qty:
-            st.markdown("**Rincian Cek Qty**")
-            st.dataframe(cek_counts(matched, "Cek Qty", CEK_QTY_ORDER))
+        st.subheader(f"SAP Dataset ({ len(filtered_sap_data[filtered_sap_data['WBS_Group'] == 'S-22002.1']) })")
+        st.dataframe(filtered_sap_data[filtered_sap_data['WBS_Group'] == 'S-22002.1'])
 
 
 def render_dashboard():
@@ -1154,8 +1098,6 @@ def render_dashboard():
         status_order = STATUS_PR_ORDER
         status_colors = STATUS_PR_COLORS
     else:
-        # Hasil match di-broadcast dari grain material ke baris trainset
-        # (attach_match) — tidak dihitung ulang per baris.
         frame = attach_match(data, matched) if matched is not None else data
         status_col = "Tindak Lanjut"
         status_order = STATUS_ORDER
@@ -1240,9 +1182,6 @@ def render_dashboard():
             st.subheader(f"Persentase per {status_col} (%)")
             st.dataframe(percentages)
 
-        if matched is not None:
-            render_validation(matched, sumber)
-
         with st.container(border=True):
             toggle_cols = st.columns(3)
             selected_labels = []
@@ -1283,6 +1222,18 @@ def render_dashboard():
                 file_name=f"tindak_lanjut_{selected_trainset.lower().replace(' ', '_')}.csv",
                 mime="text/csv",
             )
+
+        render_sap_data()
+
+        with st.container(border=True):
+            merge_data = pd.merge(
+                filtered_bom_data,
+                filtered_sap_data,
+                left_on=['Kode Material', 'WBS Elem'],
+                right_on=['Kode Material', 'WBS_Group'],
+                how='inner'
+            )
+            st.subheader("Match dataset")
 
 def render():
     st.title("Statistics Dashboard")
