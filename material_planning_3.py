@@ -850,7 +850,7 @@ def render_dashboard():
     percentages = percentage_by_status(counts)
 
     with st.container(border=True):
-        col1, col2, col3 = st.columns(3, border=True)
+        col1, col2 = st.columns(2, border=True)
 
         with col1:
             st.subheader("Total Item")
@@ -858,9 +858,9 @@ def render_dashboard():
         with col2:
             st.subheader("Jumlah Material")
             st.markdown(f"# {frame['Kode Material'].nunique():,}")
-        with col3:
-            st.subheader("Trainset")
-            st.markdown(f"# {data['Trainset'].nunique()}")
+        # with col3:
+        #     st.subheader("Trainset")
+        #     st.markdown(f"# {data['Trainset'].nunique()}")
 
         with st.container(border=True):
             col1, col2 = st.columns(2, border=True)
@@ -916,63 +916,63 @@ def render_dashboard():
                     )
                     st.plotly_chart(tlchart)
             
-        with st.container(border=True):
-            st.subheader("Komposisi Tindak Lanjut per Trainset")
-            semua_trainset = list(trainset_options[1:])  # tanpa "Semua"
-            per_ts = status_by_trainset(data, all_trainsets=semua_trainset)
-            if per_ts.empty:
-                st.info("Belum ada baris untuk ditampilkan.")
-            else:
-                if mode_semua:
-                    st.caption(
-                        "Persentase dari jumlah baris tiap trainset "
-                        "(Tindak Lanjut per baris, bukan Status PR hasil "
-                        "gabungan lintas trainset)."
-                    )
-                else:
-                    st.caption(
-                        f"Persentase dari jumlah baris {selected_trainset}; "
-                        "trainset lain tampil 0 karena datanya sudah "
-                        "difilter."
-                    )
-                ts_long = per_ts.reset_index().melt(
-                    id_vars="Trainset",
-                    var_name="Tindak Lanjut",
-                    value_name="Persentase (%)",
-                )
-                ts_chart = px.bar(
-                    ts_long,
-                    x="Trainset",
-                    y="Persentase (%)",
-                    color="Tindak Lanjut",
-                    barmode="stack",
-                    color_discrete_map=STATUS_COLORS,
-                    category_orders={
-                        "Trainset": list(per_ts.index),
-                        "Tindak Lanjut": list(per_ts.columns),
-                    },
-                )
-                ts_chart.update_yaxes(ticksuffix="%", range=[0, 100])
-                ts_chart.update_layout(
-                    xaxis_title="Trainset",
-                    yaxis_title="Persentase (%)",
-                    legend=dict(
-                        orientation="h",
-                        yanchor="top",
-                        y=-0.15,
-                        xanchor="center",
-                        x=0.5,
-                    ),
-                )
-                st.plotly_chart(ts_chart, width="stretch", height=450)
+        # with st.container(border=True):
+        #     st.subheader("Komposisi Tindak Lanjut per Trainset")
+        #     semua_trainset = list(trainset_options[1:])  # tanpa "Semua"
+        #     per_ts = status_by_trainset(data, all_trainsets=semua_trainset)
+        #     if per_ts.empty:
+        #         st.info("Belum ada baris untuk ditampilkan.")
+        #     else:
+        #         if mode_semua:
+        #             st.caption(
+        #                 "Persentase dari jumlah baris tiap trainset "
+        #                 "(Tindak Lanjut per baris, bukan Status PR hasil "
+        #                 "gabungan lintas trainset)."
+        #             )
+        #         else:
+        #             st.caption(
+        #                 f"Persentase dari jumlah baris {selected_trainset}; "
+        #                 "trainset lain tampil 0 karena datanya sudah "
+        #                 "difilter."
+        #             )
+        #         ts_long = per_ts.reset_index().melt(
+        #             id_vars="Trainset",
+        #             var_name="Tindak Lanjut",
+        #             value_name="Persentase (%)",
+        #         )
+        #         ts_chart = px.bar(
+        #             ts_long,
+        #             x="Trainset",
+        #             y="Persentase (%)",
+        #             color="Tindak Lanjut",
+        #             barmode="stack",
+        #             color_discrete_map=STATUS_COLORS,
+        #             category_orders={
+        #                 "Trainset": list(per_ts.index),
+        #                 "Tindak Lanjut": list(per_ts.columns),
+        #             },
+        #         )
+        #         ts_chart.update_yaxes(ticksuffix="%", range=[0, 100])
+        #         ts_chart.update_layout(
+        #             xaxis_title="Trainset",
+        #             yaxis_title="Persentase (%)",
+        #             legend=dict(
+        #                 orientation="h",
+        #                 yanchor="top",
+        #                 y=-0.15,
+        #                 xanchor="center",
+        #                 x=0.5,
+        #             ),
+        #         )
+        #         st.plotly_chart(ts_chart, width="stretch", height=450)
 
         with st.container(border=True):
             st.subheader(f"Jumlah per {status_col}")
             st.dataframe(counts)
 
-        with st.container(border=True):
-            st.subheader(f"Persentase per {status_col} (%)")
-            st.dataframe(percentages)
+        # with st.container(border=True):
+        #     st.subheader(f"Persentase per {status_col} (%)")
+        #     st.dataframe(percentages)
 
         with st.container(border=True):
             toggle_cols = st.columns(3)
@@ -986,28 +986,27 @@ def render_dashboard():
             if selected_labels:
                 df_terfilter = frame[frame[status_col].isin(selected_labels)]
 
-            # Filter mismatch SAP tanpa mengubah/menambahkan kolom di df_terfilter
-            if matched is not None:
-                if st.toggle(
-                    "Hanya baris yang tidak cocok dengan SAP",
-                    key="tl_toggle_sap_mismatch",
-                ):
-                    mismatched = matched[matched["Hasil Match"] != "SESUAI"]
-                    # Ambil kunci yang tidak sesuai
-                    mismatch_keys = set(
-                        zip(
-                            mismatched["NO"].astype(str).str.strip(),
-                            mismatched["Kode Material"].astype(str).str.strip(),
-                            mismatched["Sheet Asal"].astype(str).str.strip(),
-                        )
-                    )
-                    curr_keys = zip(
-                        df_terfilter["NO"].astype(str).str.strip(),
-                        df_terfilter["Kode Material"].astype(str).str.strip(),
-                        df_terfilter["Sheet Asal"].astype(str).str.strip(),
-                    )
-                    mask = [k in mismatch_keys for k in curr_keys]
-                    df_terfilter = df_terfilter[mask]
+            # if matched is not None:
+            #     if st.toggle(
+            #         "Hanya baris yang tidak cocok dengan SAP",
+            #         key="tl_toggle_sap_mismatch",
+            #     ):
+            #         mismatched = matched[matched["Hasil Match"] != "SESUAI"]
+            #         # Ambil kunci yang tidak sesuai
+            #         mismatch_keys = set(
+            #             zip(
+            #                 mismatched["NO"].astype(str).str.strip(),
+            #                 mismatched["Kode Material"].astype(str).str.strip(),
+            #                 mismatched["Sheet Asal"].astype(str).str.strip(),
+            #             )
+            #         )
+            #         curr_keys = zip(
+            #             df_terfilter["NO"].astype(str).str.strip(),
+            #             df_terfilter["Kode Material"].astype(str).str.strip(),
+            #             df_terfilter["Sheet Asal"].astype(str).str.strip(),
+            #         )
+            #         mask = [k in mismatch_keys for k in curr_keys]
+            #         df_terfilter = df_terfilter[mask]
 
             st.subheader(
                 f"Dataset Bill Of Materials ({len(df_terfilter):,})"
@@ -1021,68 +1020,68 @@ def render_dashboard():
                 mime="text/csv",
             )
 
-        with st.container(border=True):
-            # SAP Dataset ditampilkan terlepas pilihan Sheet Asal (Semua atau spesifik).
-            try:
-                sap_full = render_sap_data()
-                filtered_sap_data = sap_full[
-                    sap_full["WBS_Group"] == "S-22002.1"
-                ]
-            except Exception as exc:
-                st.error(f"Gagal memuat data SAP: {exc}")
-                filtered_sap_data = pd.DataFrame()
-
-            st.subheader(f"SAP Dataset ({len(filtered_sap_data)})")
-            if filtered_sap_data.empty:
-                st.info("Tidak ada data SAP untuk ditampilkan.")
-            else:
-                st.dataframe(filtered_sap_data, width="stretch")
-
-        with st.container(border=True):
-            if filtered_sap_data.empty:
-                st.info("Data SAP tidak tersedia, merger dataset tidak bisa ditampilkan.")
-            else:
-                sap_cols_already = any(
-                    c in df_terfilter.columns for c in ("Qty Requested", "Status SAP")
-                )
-
-                if sap_cols_already:
-                    merge_data = df_terfilter.copy()
-                    if "Kebutuhan" in merge_data.columns and "Qty Requested" in merge_data.columns:
-                        pass  # sudah ada berdampingan
+        with st.expander(
+            "Total PR SAP Dataset"
+        ):
+            with st.container(border=True):
+                try:
+                    sap_full = render_sap_data()
+                    filtered_sap_data = sap_full[
+                        sap_full["WBS_Group"] == "S-22002.1"
+                    ]
+                except Exception as exc:
+                    st.error(f"Gagal memuat data SAP: {exc}")
+                    filtered_sap_data = pd.DataFrame()
+                if filtered_sap_data.empty:
+                    st.info("Tidak ada data SAP untuk ditampilkan.")
                 else:
-                    bom_for_merge = df_terfilter.copy()
-                    if "WBS Elem" not in bom_for_merge.columns:
-                        bom_for_merge["WBS Elem"] = "S-22002.1"
+                    st.dataframe(filtered_sap_data, width="stretch")
 
-                    sap_for_merge = filtered_sap_data.copy()
-                    rename_map = {
-                        "Qty Requested": "Qty Requested",
-                        "Ordered": "Ordered",
-                        "PR Status": "PR Status (SAP)",
-                    }
-                    sap_for_merge = sap_for_merge.rename(
-                        columns={k: v for k, v in rename_map.items() if k in sap_for_merge.columns}
-                    )
-                    drop_cols = [c for c in ("WBS Description", "Mat. Description", "Spesifikasi")
-                                 if c in sap_for_merge.columns and c in bom_for_merge.columns]
-                    sap_for_merge = sap_for_merge.drop(columns=drop_cols, errors="ignore")
+        # with st.container(border=True):
+        #     if filtered_sap_data.empty:
+        #         st.info("Data SAP tidak tersedia, merger dataset tidak bisa ditampilkan.")
+        #     else:
+        #         sap_cols_already = any(
+        #             c in df_terfilter.columns for c in ("Qty Requested", "Status SAP")
+        #         )
 
-                    merge_data = pd.merge(
-                        bom_for_merge,
-                        sap_for_merge,
-                        left_on=["Kode Material", "WBS Elem"],
-                        right_on=["Kode Material", "WBS_Group"],
-                        how="left",
-                    )
-                    # Hapus kunci SAP yang duplikat setelah merge.
-                    if "WBS_Group" in merge_data.columns:
-                        merge_data = merge_data.drop(columns=["WBS_Group"])
+        #         if sap_cols_already:
+        #             merge_data = df_terfilter.copy()
+        #             if "Kebutuhan" in merge_data.columns and "Qty Requested" in merge_data.columns:
+        #                 pass  # sudah ada berdampingan
+        #         else:
+        #             bom_for_merge = df_terfilter.copy()
+        #             if "WBS Elem" not in bom_for_merge.columns:
+        #                 bom_for_merge["WBS Elem"] = "S-22002.1"
 
-                st.subheader(
-                    f"Merger Dataset ({len(merge_data):,})"
-                )
-                st.dataframe(merge_data, width="stretch")
+        #             sap_for_merge = filtered_sap_data.copy()
+        #             rename_map = {
+        #                 "Qty Requested": "Qty Requested",
+        #                 "Ordered": "Ordered",
+        #                 "PR Status": "PR Status (SAP)",
+        #             }
+        #             sap_for_merge = sap_for_merge.rename(
+        #                 columns={k: v for k, v in rename_map.items() if k in sap_for_merge.columns}
+        #             )
+        #             drop_cols = [c for c in ("WBS Description", "Mat. Description", "Spesifikasi")
+        #                          if c in sap_for_merge.columns and c in bom_for_merge.columns]
+        #             sap_for_merge = sap_for_merge.drop(columns=drop_cols, errors="ignore")
+
+        #             merge_data = pd.merge(
+        #                 bom_for_merge,
+        #                 sap_for_merge,
+        #                 left_on=["Kode Material", "WBS Elem"],
+        #                 right_on=["Kode Material", "WBS_Group"],
+        #                 how="left",
+        #             )
+        #             # Hapus kunci SAP yang duplikat setelah merge.
+        #             if "WBS_Group" in merge_data.columns:
+        #                 merge_data = merge_data.drop(columns=["WBS_Group"])
+
+        #         st.subheader(
+        #             f"Merger Dataset ({len(merge_data):,})"
+        #         )
+        #         st.dataframe(merge_data, width="stretch")
 
 def render():
     st.title("Statistics Dashboard")
